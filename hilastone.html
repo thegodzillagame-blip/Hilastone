@@ -198,11 +198,12 @@
   .side-col { position: sticky; top: 12px; }
 
   /* Board screen */
-  .energy-row { display: flex; gap: 8px; margin-bottom: 12px; }
+  .energy-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   .energy-pill {
-    flex: 1; border-radius: var(--radius-md);
-    padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;
+    flex: 1; min-width: 220px; border-radius: var(--radius-md);
+    padding: 10px 14px;
   }
+  .energy-pill .ep-top { display: flex; justify-content: space-between; align-items: center; }
   .energy-pill.panel {}
   .energy-pill .ep-label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
   .energy-pill .ep-val { font-size: 20px; font-weight: 700; }
@@ -212,6 +213,14 @@
   .energy-pill.p2 .ep-val { color: var(--p2-color); }
   .energy-pill.locked { opacity: 0.85; }
   .energy-pill .ep-lock-note { font-size: 9px; color: var(--text-tertiary); font-style: italic; }
+  .energy-pill .ep-quick-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; margin-top: 8px; }
+  .energy-pill .ep-quick-row button { padding: 5px 2px; font-size: 11px; }
+  .energy-pill .ep-bottom-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+  .energy-pill .ep-bottom-row button.primary { font-size: 11px; padding: 6px 10px; flex-shrink: 0; }
+  .ep-free-toggle { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); cursor: pointer; }
+  .ep-free-toggle .switch { width: 32px; height: 18px; }
+  .ep-free-toggle .switch .slider::before { height: 12px; width: 12px; }
+  .ep-free-toggle .switch input:checked + .slider::before { transform: translateX(14px); }
 
   .board {
     padding: 14px; margin-bottom: 14px;
@@ -265,6 +274,14 @@
   .unit-card .uc-name { font-size: 9.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; }
   .unit-card .uc-hp { font-size: 9px; color: var(--text-secondary); }
   .unit-card .uc-hp .hp-low { color: var(--danger); font-weight: 700; }
+  .unit-card .uc-hp .uc-overhp-tag { color: var(--accent-deep); font-weight: 700; margin-left: 2px; }
+  .uc-badge {
+    position: absolute; font-size: 8px; font-weight: 900; padding: 1px 4px; border-radius: 6px;
+    color: #fff; line-height: 1.4; pointer-events: none;
+  }
+  .uc-badge-dmg { top: 2px; left: 2px; background: var(--danger); }
+  .uc-badge-over { top: 2px; right: 2px; background: var(--accent-deep); }
+  .unit-card.locked-unit .uc-badge-over { right: 18px; }
   .unit-card.selected-detail { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold); }
   .lane-empty-slot {
     border: 1px dashed var(--border); border-radius: 8px; min-height: 56px;
@@ -321,8 +338,15 @@
   .hp-control { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 14px 0; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 1px solid var(--border); }
   .hp-control .hp-display { font-size: 26px; font-weight: 700; min-width: 70px; text-align: center; }
   .hp-control .hp-display .hp-max { font-size: 14px; color: var(--text-tertiary); font-weight: 400; }
+  .hp-control .hp-display .hp-over { font-size: 14px; color: var(--accent-deep); font-weight: 700; margin-left: 2px; }
   .hp-btn-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px; }
   .hp-btn-grid button { font-size: 12px; padding: 8px 4px; }
+  .dp-section-hint { text-transform: none; font-weight: 400; letter-spacing: 0; color: var(--text-tertiary); font-size: 9.5px; }
+  .stat-control { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 1px solid var(--border); }
+  .stat-control .stat-display { font-size: 17px; font-weight: 700; min-width: 38px; text-align: center; }
+  .stat-control .stat-display.over { color: var(--accent-deep); }
+  .stat-control .stat-display.boost { color: var(--danger); }
+  .stat-control button.ghost { font-size: 11px; padding: 6px 8px; }
   .dp-section { margin-bottom: 14px; }
   .dp-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); margin-bottom: 6px; font-weight: 700; }
   .ability-row { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 12px; }
@@ -435,8 +459,8 @@ function freshGameState() {
     createdAt: Date.now(),
     phase: "setup", // setup -> playing
     players: {
-      "1": { name: "Player 1", energy: BASE_ENERGY, hand: [], pool: [], boardLeft: [], boardCenter: [], boardRight: [], graveyard: [], laneDisabled: { Left: false, Center: false, Right: false }, handLocked: false },
-      "2": { name: "Player 2", energy: BASE_ENERGY, hand: [], pool: [], boardLeft: [], boardCenter: [], boardRight: [], graveyard: [], laneDisabled: { Left: false, Center: false, Right: false }, handLocked: false },
+      "1": { name: "Player 1", energy: BASE_ENERGY, hand: [], pool: [], boardLeft: [], boardCenter: [], boardRight: [], graveyard: [], laneDisabled: { Left: false, Center: false, Right: false }, handLocked: false, freeSummon: false },
+      "2": { name: "Player 2", energy: BASE_ENERGY, hand: [], pool: [], boardLeft: [], boardCenter: [], boardRight: [], graveyard: [], laneDisabled: { Left: false, Center: false, Right: false }, handLocked: false, freeSummon: false },
     },
   };
 }
@@ -448,6 +472,8 @@ function instanceFromCard(card) {
     maxHp: card.hp,
     hp: card.hp,
     disabled: false,
+    dmgBoost: 0,
+    overHp: 0,
   };
 }
 
@@ -463,6 +489,10 @@ let modalState = null; // { type: 'addUnit'|'summon', ...} -- unit info now live
 let detailState = null; // { seat, lane, instanceId } -- drives the side detail panel
 let setupPickMode = "manual"; // manual | random
 let unsavedTimer = null;
+let saveInFlight = false;   // true while a write request is on the wire
+let dirty = false;          // true if local `game` has changes not yet confirmed saved
+let pendingResave = false;  // true if more edits came in while a save was already in flight
+let saveFailCount = 0;      // consecutive save failures, used for simple backoff
 
 const app = document.getElementById("app");
 
@@ -477,8 +507,13 @@ function isCompatibleSave(data) {
 }
 
 async function loadGame(silent) {
+  // Never let an incoming poll clobber edits we haven't confirmed saved yet —
+  // this is what caused the rubberbanding: a poll would land mid-edit and
+  // overwrite the in-memory game with stale server data.
+  if (dirty || saveInFlight) return;
   try {
     const data = await fsGetDoc(matchId);
+    if (dirty || saveInFlight) return; // re-check: an edit may have happened during the fetch
     if (data && isCompatibleSave(data)) {
       game = data;
       // backfill any missing fields from older saves of THIS version
@@ -488,6 +523,14 @@ async function loadGame(silent) {
         if (!p.graveyard) p.graveyard = [];
         if (!p.laneDisabled) p.laneDisabled = { Left: false, Center: false, Right: false };
         if (p.handLocked === undefined) p.handLocked = false;
+        if (p.freeSummon === undefined) p.freeSummon = false;
+        for (const lane of LANES) {
+          const units = p[laneKey(lane)] || [];
+          for (const u of units) {
+            if (u.dmgBoost === undefined) u.dmgBoost = 0;
+            if (u.overHp === undefined) u.overHp = 0;
+          }
+        }
       }
       if (game.phase === undefined) game.phase = "setup";
     } else {
@@ -503,17 +546,44 @@ async function loadGame(silent) {
 }
 
 async function saveGame() {
+  if (saveInFlight) {
+    // A save is already on the wire; remember to run again once it's done
+    // instead of firing a second overlapping write.
+    pendingResave = true;
+    return;
+  }
+  saveInFlight = true;
+  let failed = false;
   try {
     await fsSetDoc(matchId, game);
+    errorMsg = null;
+    saveFailCount = 0;
   } catch (e) {
-    errorMsg = "Couldn't save — check your connection.";
+    failed = true;
+    saveFailCount++;
+    errorMsg = "Couldn't save — retrying...";
     console.error(e);
+  } finally {
+    saveInFlight = false;
+  }
+  if (pendingResave || failed) {
+    pendingResave = false;
+    // Loop back through scheduleSave so further rapid edits still debounce,
+    // and a failed save gets an automatic retry (with backoff) rather than
+    // silently letting the next poll overwrite the unsaved change.
+    scheduleSave(failed);
+  } else {
+    dirty = false;
   }
 }
 
-function scheduleSave() {
+function scheduleSave(isRetry) {
+  dirty = true;
   clearTimeout(unsavedTimer);
-  unsavedTimer = setTimeout(saveGame, 250);
+  // Back off on repeated failures (capped at 5s) so a network outage doesn't
+  // hammer Firestore with a request every 250ms.
+  const delay = isRetry ? Math.min(5000, 250 * Math.pow(2, saveFailCount)) : 250;
+  unsavedTimer = setTimeout(saveGame, delay);
   render();
 }
 
@@ -580,10 +650,10 @@ function summonFromHand(seat, name, lane) {
   const idx = p.hand.indexOf(name);
   if (idx < 0) return;
   const card = cardDef(name);
-  if (p.energy < card.cost) return;
+  if (!p.freeSummon && p.energy < card.cost) return;
   p.hand.splice(idx, 1);
   p[lk].push(instanceFromCard(card));
-  p.energy -= card.cost;
+  if (!p.freeSummon) p.energy -= card.cost;
   scheduleSave();
   modalState = null;
 }
@@ -605,6 +675,28 @@ function setHp(seat, lane, instanceId, value) {
   const unit = p[lk].find(u => u.instanceId === instanceId);
   if (!unit) return;
   unit.hp = Math.max(0, Math.min(unit.maxHp, value));
+  scheduleSave();
+}
+
+function adjustDmgBoost(seat, lane, instanceId, delta) {
+  if (!isMine(seat)) return;
+  const p = game.players[seat];
+  const lk = laneKey(lane);
+  const unit = p[lk].find(u => u.instanceId === instanceId);
+  if (!unit) return;
+  if (unit.dmgBoost === undefined) unit.dmgBoost = 0;
+  unit.dmgBoost = Math.max(0, unit.dmgBoost + delta);
+  scheduleSave();
+}
+
+function adjustOverHp(seat, lane, instanceId, delta) {
+  if (!isMine(seat)) return;
+  const p = game.players[seat];
+  const lk = laneKey(lane);
+  const unit = p[lk].find(u => u.instanceId === instanceId);
+  if (!unit) return;
+  if (unit.overHp === undefined) unit.overHp = 0;
+  unit.overHp = Math.max(0, unit.overHp + delta);
   scheduleSave();
 }
 
@@ -658,6 +750,20 @@ function adjustEnergy(seat, delta) {
   scheduleSave();
 }
 
+function setEnergy(seat, value) {
+  if (!isMine(seat)) return;
+  const p = game.players[seat];
+  p.energy = Math.max(0, value);
+  scheduleSave();
+}
+
+function toggleFreeSummon(seat) {
+  if (!isMine(seat)) return;
+  const p = game.players[seat];
+  p.freeSummon = !p.freeSummon;
+  scheduleSave();
+}
+
 function resetMatch() {
   if (!confirm("Start a brand new match? This clears the board for both players.")) return;
   game = freshGameState();
@@ -685,6 +791,7 @@ function render() {
     }
   } catch (e) {
     console.error("Render error:", e);
+    boardMountedForSeat = null;
     app.innerHTML = `
       <div class="errorMsg" style="margin-top:2rem">
         Something went wrong rendering the board (likely a leftover save from an older version).
@@ -802,6 +909,15 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
 }
 
+// Track whether the board skeleton (the outer DOM shell) is already mounted
+// for the current seat, so repeated renders only patch the specific sections
+// that changed instead of reassigning innerHTML for the whole board. Every
+// card image is an inline base64 data URI — reassigning innerHTML forces the
+// browser to redecode every visible image on every click, which is the main
+// cause of stutter/rubberbanding. Patching only changed sections keeps
+// unrelated <img> nodes untouched so they're never redecoded.
+let boardMountedForSeat = null;
+
 function renderBoard() {
   const seat = String(mySeat);
   const oppSeat = seat === "1" ? "2" : "1";
@@ -810,7 +926,68 @@ function renderBoard() {
   const me = game.players[seat];
   const opp = game.players[oppSeat];
 
+  if (boardMountedForSeat !== seat || !document.getElementById("boardSkeleton")) {
+    mountBoardSkeleton(seat);
+    boardMountedForSeat = seat;
+  }
+
+  // Error banner
+  const errBox = document.getElementById("errorBox");
+  if (errBox) errBox.innerHTML = errorMsg ? `<div class="errorMsg">${errorMsg}</div>` : "";
+
+  // Energy pills
+  const energyRow = document.getElementById("energyRow");
+  if (energyRow) {
+    energyRow.innerHTML = energyPillHtml("1", p1) + energyPillHtml("2", p2);
+    bindEnergyRowEvents();
+  }
+
+  // Board lanes (only this section contains the many per-unit card images)
+  const lanesP1 = document.getElementById("lanesP1");
+  const lanesP2 = document.getElementById("lanesP2");
+  if (lanesP1) lanesP1.innerHTML = LANES.map(lane => laneHtml("1", lane)).join("");
+  if (lanesP2) lanesP2.innerHTML = LANES.map(lane => laneHtml("2", lane)).join("");
+  bindLaneEvents();
+
+  // Hand
+  const handHead = document.getElementById("myHandHead");
+  if (handHead) handHead.innerHTML = `<h2>Your Hand (${me.hand.length})</h2>`;
+  const handCards = document.getElementById("myHandCards");
+  if (handCards) {
+    handCards.innerHTML = me.hand.length === 0 ? `<div class="empty-hint">Empty</div>` : me.hand.map(name => {
+      const c = cardDef(name);
+      return `<div class="hand-card" data-handcard="${escapeHtml(name)}"><img src="${getCardImage(name)}" alt="${name}"><div class="hc-name">${name}</div><div class="hc-cost">${c.cost}⚡</div></div>`;
+    }).join("");
+    bindHandCardEvents(seat);
+  }
+  const oppHandHead = document.getElementById("oppHandHead");
+  if (oppHandHead) oppHandHead.innerHTML = `<h2 style="font-size:13px;color:var(--text-tertiary)">Opponent's Hand (${opp.hand.length} cards)</h2>`;
+  const oppHandCards = document.getElementById("oppHandCards");
+  if (oppHandCards) oppHandCards.innerHTML = opp.hand.length === 0 ? `<div class="empty-hint">Empty</div>` : opp.hand.map(() => `<div class="hand-back">🂠</div>`).join("");
+
+  // Graveyard
+  const gyP1 = document.getElementById("gyP1");
+  const gyP2 = document.getElementById("gyP2");
+  if (gyP1) {
+    document.getElementById("gyP1Label").textContent = `Player 1 (${p1.graveyard.length})`;
+    gyP1.innerHTML = p1.graveyard.map(n => `<div class="gy-card"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
+  }
+  if (gyP2) {
+    document.getElementById("gyP2Label").textContent = `Player 2 (${p2.graveyard.length})`;
+    gyP2.innerHTML = p2.graveyard.map(n => `<div class="gy-card"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
+  }
+
+  // Side detail panel
+  const sideCol = document.getElementById("sideCol");
+  if (sideCol) {
+    sideCol.innerHTML = detailPanelHtml();
+    bindDetailPanelEvents();
+  }
+}
+
+function mountBoardSkeleton(seat) {
   app.innerHTML = `
+    <div id="boardSkeleton">
     <div class="topbar">
       <h1>Hilastone</h1>
       <div class="topbar-right">
@@ -818,64 +995,64 @@ function renderBoard() {
         <button class="ghost icon-btn" id="resetBtn" title="Reset match">↺</button>
       </div>
     </div>
-    ${errorMsg ? `<div class="errorMsg">${errorMsg}</div>` : ""}
+    <div id="errorBox"></div>
 
     <div class="game-layout">
       <div class="main-col">
-        <div class="energy-row">
-          ${energyPillHtml("1", p1)}
-          ${energyPillHtml("2", p2)}
-        </div>
+        <div class="energy-row" id="energyRow"></div>
 
         <div class="board panel">
           <div class="board-row-label">Player 1's lanes</div>
-          <div class="lanes">${LANES.map(lane => laneHtml("1", lane)).join("")}</div>
+          <div class="lanes" id="lanesP1"></div>
           <div class="board-row-label">Player 2's lanes</div>
-          <div class="lanes">${LANES.map(lane => laneHtml("2", lane)).join("")}</div>
+          <div class="lanes" id="lanesP2"></div>
         </div>
 
         <div class="hand-section panel">
-          <div class="hand-section-head"><h2>Your Hand (${me.hand.length})</h2></div>
-          <div class="hand-cards">
-            ${me.hand.length === 0 ? `<div class="empty-hint">Empty</div>` : me.hand.map(name => {
-              const c = cardDef(name);
-              return `<div class="hand-card" data-handcard="${escapeHtml(name)}"><img src="${getCardImage(name)}" alt="${name}"><div class="hc-name">${name}</div><div class="hc-cost">${c.cost}⚡</div></div>`;
-            }).join("")}
-          </div>
-          <div class="hand-section-head" style="margin-top:14px;margin-bottom:6px"><h2 style="font-size:13px;color:var(--text-tertiary)">Opponent's Hand (${opp.hand.length} cards)</h2></div>
-          <div class="hand-cards">
-            ${opp.hand.length === 0 ? `<div class="empty-hint">Empty</div>` : opp.hand.map(() => `<div class="hand-back">🂠</div>`).join("")}
-          </div>
+          <div class="hand-section-head" id="myHandHead"></div>
+          <div class="hand-cards" id="myHandCards"></div>
+          <div class="hand-section-head" id="oppHandHead" style="margin-top:14px;margin-bottom:6px"></div>
+          <div class="hand-cards" id="oppHandCards"></div>
         </div>
 
         <div class="graveyard-section panel">
           <div class="hand-section-head"><h2 style="font-size:13px">Graveyard</h2></div>
           <div style="display:flex;gap:14px">
             <div style="flex:1">
-              <div style="font-size:10px;color:var(--text-tertiary);margin-bottom:4px">Player 1 (${p1.graveyard.length})</div>
-              <div class="gy-row">${p1.graveyard.map(n => `<div class="gy-card"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`}</div>
+              <div id="gyP1Label" style="font-size:10px;color:var(--text-tertiary);margin-bottom:4px"></div>
+              <div class="gy-row" id="gyP1"></div>
             </div>
             <div style="flex:1">
-              <div style="font-size:10px;color:var(--text-tertiary);margin-bottom:4px">Player 2 (${p2.graveyard.length})</div>
-              <div class="gy-row">${p2.graveyard.map(n => `<div class="gy-card"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`}</div>
+              <div id="gyP2Label" style="font-size:10px;color:var(--text-tertiary);margin-bottom:4px"></div>
+              <div class="gy-row" id="gyP2"></div>
             </div>
           </div>
         </div>
       </div>
 
-      <div class="side-col">
-        ${detailPanelHtml()}
-      </div>
+      <div class="side-col" id="sideCol"></div>
+    </div>
     </div>
   `;
-
   document.getElementById("resetBtn").onclick = resetMatch;
+}
+
+function bindEnergyRowEvents() {
   document.querySelectorAll("[data-energy]").forEach(el => {
     el.onclick = () => {
       const [s, d] = el.dataset.energy.split(",");
       adjustEnergy(s, Number(d));
     };
   });
+  document.querySelectorAll("[data-setenergy5]").forEach(el => {
+    el.onclick = () => setEnergy(el.dataset.setenergy5, BASE_ENERGY);
+  });
+  document.querySelectorAll("[data-freesummon]").forEach(el => {
+    el.onchange = () => toggleFreeSummon(el.dataset.freesummon);
+  });
+}
+
+function bindLaneEvents() {
   document.querySelectorAll("[data-unit]").forEach(el => {
     el.onclick = () => {
       const [s, lane, iid] = el.dataset.unit.split("|");
@@ -898,29 +1075,49 @@ function renderBoard() {
       toggleLaneDisabled(s, lane);
     };
   });
+}
+
+function bindHandCardEvents(seat) {
   document.querySelectorAll("[data-handcard]").forEach(el => {
     el.onclick = () => {
       modalState = { type: "summon", seat, name: el.dataset.handcard };
       render();
     };
   });
-
-  bindDetailPanelEvents();
 }
 
 function energyPillHtml(seat, p) {
   const mine = isMine(seat);
   return `
     <div class="energy-pill panel p${seat} ${mine ? "" : "locked"}">
-      <div>
-        <div class="ep-label">Player ${seat} Energy</div>
-        <div class="ep-val">${p.energy}</div>
-        ${mine ? "" : `<div class="ep-lock-note">Controlled by Player ${seat}</div>`}
+      <div class="ep-top">
+        <div>
+          <div class="ep-label">Player ${seat} Energy</div>
+          <div class="ep-val">${p.energy}</div>
+          ${mine ? "" : `<div class="ep-lock-note">Controlled by Player ${seat}</div>`}
+        </div>
+        ${mine
+          ? `<div class="ep-btns"><button data-energy="${seat},-1">−1</button><button data-energy="${seat},1">+1</button></div>`
+          : `<div class="ep-btns"><button class="ghost" disabled title="You can only adjust your own energy">🔒</button></div>`
+        }
       </div>
-      ${mine
-        ? `<div class="ep-btns"><button data-energy="${seat},-1">−</button><button data-energy="${seat},1">+</button></div>`
-        : `<div class="ep-btns"><button class="ghost" disabled title="You can only adjust your own energy">🔒</button></div>`
-      }
+      ${mine ? `
+      <div class="ep-quick-row">
+        <button class="danger" data-energy="${seat},-4">−4</button>
+        <button class="danger" data-energy="${seat},-3">−3</button>
+        <button class="danger" data-energy="${seat},-2">−2</button>
+        <button class="success" data-energy="${seat},2">+2</button>
+        <button class="success" data-energy="${seat},3">+3</button>
+        <button class="success" data-energy="${seat},4">+4</button>
+      </div>
+      <div class="ep-bottom-row">
+        <button class="primary" data-setenergy5="${seat}">Set to ${BASE_ENERGY}</button>
+        <label class="ep-free-toggle">
+          <span class="switch"><input type="checkbox" data-freesummon="${seat}" ${p.freeSummon ? "checked" : ""}><span class="slider"></span></span>
+          <span>Free summon</span>
+        </label>
+      </div>
+      ` : ""}
     </div>
   `;
 }
@@ -959,8 +1156,10 @@ function unitCardHtml(seat, lane, u) {
   return `
     <div class="unit-card ${u.disabled ? "disabled-unit" : ""} ${mine ? "" : "locked-unit"} ${isSelected ? "selected-detail" : ""}" data-unit="${seat}|${lane}|${u.instanceId}" title="${mine ? "" : "Opponent's unit — view only"}">
       <img src="${getCardImage(u.name)}" alt="${u.name}">
+      ${u.dmgBoost > 0 ? `<div class="uc-badge uc-badge-dmg" title="Damage boost">⚔+${u.dmgBoost}</div>` : ""}
+      ${u.overHp > 0 ? `<div class="uc-badge uc-badge-over" title="Over health">+${u.overHp}</div>` : ""}
       <div class="uc-name">${u.name}</div>
-      <div class="uc-hp"><span class="${lowHp ? "hp-low" : ""}">${u.hp}</span>/${u.maxHp}</div>
+      <div class="uc-hp"><span class="${lowHp ? "hp-low" : ""}">${u.hp}</span>/${u.maxHp}${u.overHp > 0 ? `<span class="uc-overhp-tag">+${u.overHp}</span>` : ""}</div>
       ${u.disabled ? `<div class="uc-disabled-tag">DISABLED</div>` : ""}
     </div>
   `;
@@ -1004,7 +1203,7 @@ function detailPanelHtml() {
 
       <div class="hp-control">
         <button class="icon-btn" data-hp="-1" ${canControl ? "" : "disabled"}>−1</button>
-        <div class="hp-display">${u.hp}<span class="hp-max"> / ${u.maxHp}</span></div>
+        <div class="hp-display">${u.hp}${u.overHp > 0 ? `<span class="hp-over">+${u.overHp}</span>` : ""}<span class="hp-max"> / ${u.maxHp}</span></div>
         <button class="icon-btn" data-hp="1" ${canControl ? "" : "disabled"}>+1</button>
       </div>
       <div class="hp-btn-grid">
@@ -1012,6 +1211,28 @@ function detailPanelHtml() {
         <button class="danger" data-hp="-2" ${canControl ? "" : "disabled"}>−2</button>
         <button class="success" data-hp="2" ${canControl ? "" : "disabled"}>+2</button>
         <button class="success" data-hp="5" ${canControl ? "" : "disabled"}>+5</button>
+      </div>
+
+      <div class="dp-section">
+        <div class="dp-section-label">Over Health <span class="dp-section-hint">(heals above max HP)</span></div>
+        <div class="stat-control">
+          <button class="icon-btn" data-overhp="-1" ${canControl ? "" : "disabled"}>−1</button>
+          <div class="stat-display over">${u.overHp || 0}</div>
+          <button class="icon-btn" data-overhp="1" ${canControl ? "" : "disabled"}>+1</button>
+          <button class="ghost" data-overhp="3" ${canControl ? "" : "disabled"}>+3</button>
+          <button class="ghost" data-overhp="-99" ${canControl ? "" : "disabled"}>Clear</button>
+        </div>
+      </div>
+
+      <div class="dp-section">
+        <div class="dp-section-label">Damage Boost <span class="dp-section-hint">(buffs applied to this card)</span></div>
+        <div class="stat-control">
+          <button class="icon-btn" data-dmgboost="-1" ${canControl ? "" : "disabled"}>−1</button>
+          <div class="stat-display boost">+${u.dmgBoost || 0}</div>
+          <button class="icon-btn" data-dmgboost="1" ${canControl ? "" : "disabled"}>+1</button>
+          <button class="ghost" data-dmgboost="3" ${canControl ? "" : "disabled"}>+3</button>
+          <button class="ghost" data-dmgboost="-99" ${canControl ? "" : "disabled"}>Clear</button>
+        </div>
       </div>
 
       <div class="dp-section">
@@ -1056,6 +1277,12 @@ function bindDetailPanelEvents() {
 
   document.querySelectorAll("[data-hp]").forEach(el => {
     el.onclick = () => { adjustHp(seat, lane, instanceId, Number(el.dataset.hp)); render(); };
+  });
+  document.querySelectorAll("[data-overhp]").forEach(el => {
+    el.onclick = () => { adjustOverHp(seat, lane, instanceId, Number(el.dataset.overhp)); render(); };
+  });
+  document.querySelectorAll("[data-dmgboost]").forEach(el => {
+    el.onclick = () => { adjustDmgBoost(seat, lane, instanceId, Number(el.dataset.dmgboost)); render(); };
   });
   const disableToggle = document.getElementById("disableToggle");
   if (disableToggle) disableToggle.onchange = () => toggleUnitDisabled(seat, lane, instanceId);
