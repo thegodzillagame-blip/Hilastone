@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hilastone</title>
+<style>
+  :root {
+    --bg: #16161a;
+    --bg-card: #1f1f24;
+    --bg-secondary: #26262c;
+    --border: #34343c;
+    --border-strong: #46464f;
+    --text: #f0f0f2;
+    --text-secondary: #a3a3ad;
+    --text-tertiary: #6e6e78;
+    --accent: #5b8def;
+    --accent-bg: rgba(91,141,239,0.12);
+    --danger: #e2554f;
+    --danger-bg: rgba(226,85,79,0.12);
+    --success: #4caf7d;
+    --warn-bg: rgba(250,199,117,0.12);
+    --warn: #facb75;
+    --overheal: #9b8cf2;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    padding-bottom: 3rem;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 1rem; }
+  h1 { font-size: 18px; font-weight: 500; margin: 0; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    background: var(--bg-card);
+    color: var(--text);
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--bg-secondary); }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  input {
+    font-family: inherit;
+    font-size: 13px;
+    background: var(--bg-card);
+    color: var(--text);
+    border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: 8px 10px;
+    width: 100%;
+  }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .pill { font-size: 12px; padding: 3px 9px; border-radius: var(--radius-md); }
+  .pill-active { background: var(--accent-bg); color: var(--accent); }
+  .pill-idle { background: var(--bg-secondary); color: var(--text-secondary); }
+  .topbtns { display: flex; gap: 6px; }
+  .topbtns button { padding: 6px 9px; }
+  .err {
+    background: var(--danger-bg); color: var(--danger); font-size: 13px;
+    padding: 8px 12px; border-radius: var(--radius-md); margin-bottom: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .targeting-banner {
+    background: var(--accent-bg); color: var(--accent); font-size: 13px;
+    padding: 8px 12px; border-radius: var(--radius-md); margin-bottom: 12px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .unit-card.valid-target { border: 2px solid var(--success); box-shadow: 0 0 0 2px rgba(76,175,125,0.25); cursor: pointer; }
+  .unit-card.dimmed { opacity: 0.35; pointer-events: none; }
+  .action-row { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+  .action-btn { flex: 1; text-align: left; font-size: 11px; padding: 6px 8px; }
+  .lane-action-btn { width: 100%; font-size: 10px; padding: 5px; margin-top: 4px; color: var(--accent); border-color: var(--accent); }
+  .panel {
+    border-radius: var(--radius-lg);
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    border: 0.5px solid var(--border);
+  }
+  .panel.active { border: 2px solid var(--accent); }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .panel-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .energy-ctrl { display: flex; align-items: center; gap: 6px; }
+  .energy-ctrl button { width: 26px; height: 26px; padding: 0; display:flex; align-items:center; justify-content:center; }
+  .energy-val { font-size: 13px; font-weight: 500; min-width: 50px; text-align: center; background: var(--bg-secondary); border-radius: var(--radius-md); padding: 4px 8px; }
+  .lanes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .lane-label { font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-tertiary); text-align: center; margin-bottom: 4px; }
+  .lane-units { display: flex; flex-direction: column; gap: 4px; min-height: 40px; }
+  .unit-card { background: var(--bg-card); border: 0.5px solid var(--border-strong); border-radius: var(--radius-sm); padding: 6px 8px; cursor: pointer; }
+  .unit-card.selected { border: 2px solid var(--accent); }
+  .unit-top { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; }
+  .unit-thumb { width: 20px; height: 20px; border-radius: 4px; object-fit: cover; flex-shrink: 0; background: var(--bg-secondary); }
+  .unit-portrait { width: 100%; aspect-ratio: 1 / 1; max-width: 160px; margin: 0 auto 8px; display: block; border-radius: var(--radius-sm); object-fit: cover; background: var(--bg-secondary); }
+  .modal-item-thumb { width: 28px; height: 28px; border-radius: 5px; object-fit: cover; flex-shrink: 0; background: var(--bg-secondary); margin-right: 8px; }
+  .modal-item-main { display: flex; align-items: center; flex: 1; min-width: 0; }
+  .action-text { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; line-height: 1.4; }
+  .action-label { font-weight: 500; color: var(--text-primary); }
+  .unit-name { font-size: 12px; font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge-dmg { font-size: 10px; font-weight: 500; padding: 1px 6px; border-radius: var(--radius-md); background: var(--warn-bg); color: var(--warn); flex-shrink: 0; }
+  .hpbar-row { display: flex; align-items: center; gap: 4px; }
+  .hpbar-track { flex: 1; height: 4px; background: var(--bg-secondary); border-radius: 2px; overflow: hidden; display: flex; }
+  .hpbar-fill { height: 100%; background: var(--success); flex-shrink: 0; }
+  .hpbar-fill.low { background: var(--danger); }
+  .hpbar-overflow { height: 100%; background: var(--overheal); flex-shrink: 0; }
+  .hp-text { font-size: 10px; color: var(--text-secondary); min-width: 32px; text-align: right; }
+  .hp-text.over { color: var(--overheal); font-weight: 500; }
+  .unit-detail { margin-top: 8px; padding-top: 8px; border-top: 0.5px solid var(--border); }
+  .detail-label { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
+  .passive-text { font-size: 10px; color: var(--text-tertiary); margin-bottom: 6px; line-height: 1.5; }
+  .row-btns { display: flex; gap: 4px; margin-bottom: 6px; }
+  .row-btns button { flex: 1; font-size: 10px; padding: 4px; }
+  .dmg-row { display: flex; gap: 4px; margin-bottom: 6px; align-items: center; }
+  .dmg-row button.sq { width: 26px; height: 26px; padding: 0; }
+  .dmg-val { font-size: 11px; font-weight: 500; min-width: 28px; text-align: center; }
+  .summon-btn { font-size: 11px; padding: 6px 4px; color: var(--text-secondary); display: flex; align-items: center; justify-content: center; gap: 3px; width: 100%; }
+  .panel-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+  .hand-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .chip { font-size: 11px; padding: 3px 8px; background: var(--bg-secondary); border-radius: var(--radius-md); }
+  .end-turn-btn { width: 100%; margin-top: 10px; padding: 10px; font-size: 14px; font-weight: 500; background: var(--accent-bg); color: var(--accent); border: none; }
+  .divider { display: flex; align-items: center; gap: 10px; margin: 14px 0; }
+  .divider-line { flex: 1; height: 0.5px; background: var(--border); }
+  .log-toggle { width: 100%; font-size: 12px; padding: 8px; color: var(--text-secondary); }
+  .log-box { max-height: 200px; overflow-y: auto; background: var(--bg-secondary); border-radius: var(--radius-md); padding: 8px 10px; margin-top: 6px; }
+  .log-line { font-size: 11px; color: var(--text-secondary); padding: 3px 0; line-height: 1.5; }
+  .log-turn { color: var(--text-tertiary); }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 1rem; }
+  .modal { background: var(--bg-card); border-radius: var(--radius-lg); border: 0.5px solid var(--border-strong); padding: 16px; max-width: 420px; width: 100%; max-height: 80vh; display: flex; flex-direction: column; }
+  .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .modal-title { font-size: 14px; font-weight: 500; }
+  .modal-list { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .modal-item { font-size: 12px; padding: 8px 10px; text-align: left; display: flex; justify-content: space-between; align-items: center; width: 100%; }
+  .modal-sub { font-size: 11px; color: var(--text-tertiary); margin: 10px 0 6px; }
+  .select-screen { padding: 2.5rem 0; text-align: center; }
+  .select-screen p.title { font-size: 15px; font-weight: 500; margin-bottom: 4px; }
+  .select-screen p.sub { font-size: 13px; color: var(--text-secondary); margin-bottom: 20px; }
+  .seat-btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .seat-btn { padding: 14px 22px; font-size: 14px; font-weight: 500; min-width: 140px; }
+  .seat-sub { font-size: 12px; color: var(--text-tertiary); font-weight: 400; margin-top: 4px; }
+  .loading { padding: 3rem 0; text-align: center; color: var(--text-secondary); font-size: 14px; }
+  .setup-screen { padding: 2rem 0; }
+  .setup-screen label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+  .setup-screen .field { margin-bottom: 14px; }
+  .crown { color: var(--accent); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="loading">Loading...</div>
+</div>
+
+<!--
+  Card portraits (hilastone-images.js) and card definitions + targeting
+  rules (hilastone-data.js) live in their own files on purpose: the
+  portrait data alone is over a megabyte of base64, and pasting that
+  through chat on every edit is what was blowing up the conversation.
+  Neither file needs to be touched to work on the game engine below.
+-->
+<script src="hilastone-images.js"></script>
+<script src="hilastone-data.js"></script>
+<script>
+const BASE_ENERGY = 5;
+
+// ---- Firebase REST helpers (no SDK, no npm needed) ----
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAvbBKj-KE4dYa_UyPq5OXB3rj3nrRTxQI",
+  projectId: "hilastone-6d796",
+};
+const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents`;
+
+function fsWrap(value) {
+  // Wrap a JS value into a Firestore REST "Value" object
+  if (value === null) return { nullValue: null };
+  if (typeof value === "string") return { stringValue: value };
+  if (typeof value === "boolean") return { booleanValue: value };
+  if (typeof value === "number") return { doubleValue: value };
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(fsWrap) } };
+  if (typeof value === "object") {
+    const fields = {};
+    for (const k in value) fields[k] = fsWrap(value[k]);
+    return { mapValue: { fields } };
+  }
+  return { nullValue: null };
+}
+
+function fsUnwrap(value) {
+  if (!value) return null;
+  if ("stringValue" in value) return value.stringValue;
+  if ("booleanValue" in value) return value.booleanValue;
+  if ("doubleValue" in value) return value.doubleValue;
+  if ("integerValue" in value) return Number(value.integerValue);
+  if ("nullValue" in value) return null;
+  if ("arrayValue" in value) return (value.arrayValue.values || []).map(fsUnwrap);
+  if ("mapValue" in value) {
+    const obj = {};
+    const fields = value.mapValue.fields || {};
+    for (const k in fields) obj[k] = fsUnwrap(fields[k]);
+    return obj;
+  }
+  return null;
+}
+
+async function fsGetDoc(docId) {
+  const res = await fetch(`${FIRESTORE_BASE}/matches/${docId}?key=${FIREBASE_CONFIG.apiKey}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("Firestore read failed: " + res.status);
+  const data = await res.json();
+  return fsUnwrap({ mapValue: { fields: data.fields || {} } });
+}
+
+async function fsSetDoc(docId, value) {
+  const body = { fields: fsWrap(value).mapValue.fields };
+  // Build an updateMask covering every top-level field we're writing, so this
+  // PATCH fully overwrites the document instead of merging on top of stale
+  // fields left over from a previous write.
+  const fieldNames = Object.keys(body.fields);
+  const maskParams = fieldNames.map(f => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join("&");
+  const url = `${FIRESTORE_BASE}/matches/${docId}?key=${FIREBASE_CONFIG.apiKey}&${maskParams}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error("Firestore write failed: " + res.status);
+}
+
+// ---- Game state helpers ----
+function uid() { return Math.random().toString(36).slice(2, 10); }
+
+function freshGameState() {
+  return {
+    createdAt: Date.now(),
+    turn: 1,
+    activePlayer: 1,
+    coinFlipDone: false,
+    players: {
+      "1": { name: "Player 1", energy: BASE_ENERGY, hand: [], boardLeft: [], boardCenter: [], boardRight: [], defeated: [] },
+      "2": { name: "Player 2", energy: BASE_ENERGY, hand: [], boardLeft: [], boardCenter: [], boardRight: [], defeated: [] },
+    },
+    log: [],
+  };
+}
+
+function instanceFromCard(card) {
+  return {
+    instanceId: uid(),
+    name: card.name,
+    cost: card.cost,
+    maxHp: card.hp,
+    hp: card.hp,
+    passiveName: card.passiveName,
+    passive: card.passive,
+    pronouns: card.pronouns || "",
+    dmgBonus: 0,
+  };
+}
+
+function laneKey(lane) { return "board" + lane; }
+
+
+function getCardImage(name) { return CARD_IMAGES[name] || null; }
+
+function cardDef(name) { return CARDS.find(c => c.name === name); }
+
+// ---- Targeting engine ----
+// `targeting` shape while active:
+// {
+//   playerNum, lane, instanceId, cardName, actionKey, rule, actionLabel,
+//   phase: "pick-target" | "pick-unit" | "pick-lane" | "pick-unit-multi",
+//   pickedUnit: { p, lane, instanceId } | null   // for two-step "move other" actions
+// }
+const ACTION_LABELS = { a1: "Action 1", a2: "Action 2", a3: "Action 3" };
+
+function getOpponentNum(p) { return p === 1 ? 2 : 1; }
+function unitsInLane(p, lane) { return (game.players[p] && game.players[p][laneKey(lane)]) || []; }
+function getAdjacentLanes(lane) { return ADJACENT_LANES[lane] || []; }
+
+function destLanesFor(scope, lane) {
+  return scope === "any-lane" ? LANES.filter(l => l !== lane) : getAdjacentLanes(lane);
+}
+
+// True if this card has at least one move-self action with any-lane scope —
+// such cards get the free "Move →" quick buttons in their detail panel
+// instead of the adjacency-restricted default.
+function unitHasFreeMoveScope(cardName) {
+  const rs = TARGETING_RULES[cardName];
+  if (!rs) return false;
+  return ["a1", "a2", "a3"].some(k => rs[k] && rs[k].mode === "move" && rs[k].side === "self" && rs[k].scope === "any-lane");
+}
+
+// Returns the list of {p, lane, instanceId} units a "single"/"all"/"move-other"
+// rule can address, given the acting unit's player/lane/instanceId.
+function computeUnitTargets(rule, actingPlayer, actingLane, actingInstanceId) {
+  const oppNum = getOpponentNum(actingPlayer);
+  const players = rule.side === "ally" ? [actingPlayer]
+    : rule.side === "opponent" ? [oppNum]
+    : [actingPlayer, oppNum]; // "both"
+  const lanes = rule.scope === "same-lane" ? [actingLane] : LANES;
+  const out = [];
+  players.forEach(p => {
+    lanes.forEach(ln => {
+      unitsInLane(p, ln).forEach(u => {
+        if (rule.excludesSelf && u.instanceId === actingInstanceId) return;
+        out.push({ p, lane: ln, instanceId: u.instanceId });
+      });
+    });
+  });
+  return out;
+}
+
+function targetKey(p, lane, instanceId) { return `${p}|${lane}|${instanceId}`; }
+
+function currentValidTargetKeys() {
+  if (!targeting) return null;
+  const { rule, playerNum, lane, instanceId, phase, pickedUnit } = targeting;
+  if (phase === "pick-target") {
+    return new Set(computeUnitTargets(rule, playerNum, lane, instanceId).map(t => targetKey(t.p, t.lane, t.instanceId)));
+  }
+  if (phase === "pick-unit" || phase === "pick-unit-multi") {
+    let list = computeUnitTargets(rule, playerNum, lane, instanceId);
+    if (phase === "pick-unit-multi") list = list.filter(t => t.lane !== lane); // already-in-lane allies don't need moving
+    return new Set(list.map(t => targetKey(t.p, t.lane, t.instanceId)));
+  }
+  return new Set(); // pick-lane: handled separately, no unit-card highlighting
+}
+
+window.__startTargeting = (playerNum, lane, instanceId, actionKey) => {
+  const player = game.players[playerNum];
+  const unit = (player[laneKey(lane)] || []).find(u => u.instanceId === instanceId);
+  if (!unit) return;
+  const def = cardDef(unit.name);
+  const ruleSet = TARGETING_RULES[unit.name];
+  const rule = ruleSet ? ruleSet[actionKey] : null;
+  const actionText = def ? def[actionKey] : "";
+
+  if (!rule || rule.mode === "none" || rule.mode === "self") {
+    addLog(`${unit.name} used ${ACTION_LABELS[actionKey]}: ${actionText}${rule && rule.note ? " — " + rule.note : ""}`);
+    saveGame();
+    return;
+  }
+
+  const base = { playerNum, lane, instanceId, cardName: unit.name, actionKey, rule, actionLabel: ACTION_LABELS[actionKey], pickedUnit: null };
+
+  if (rule.mode === "move") {
+    targeting = { ...base, phase: rule.side === "self" ? "pick-lane" : "pick-unit" };
+  } else if (rule.mode === "capacity-multi") {
+    targeting = { ...base, phase: "pick-unit-multi" };
+  } else {
+    // "single" or "all"
+    targeting = { ...base, phase: "pick-target" };
+  }
+  render();
+};
+
+window.__cancelTargeting = () => { targeting = null; render(); };
+
+// Resolves a tap on a unit-card while targeting is active.
+window.__resolveTarget = async (p, lane, instanceId) => {
+  if (!targeting) return;
+  const { rule, cardName, actionLabel, phase, playerNum, lane: srcLane, instanceId: srcId } = targeting;
+  const targetUnit = (game.players[p][laneKey(lane)] || []).find(u => u.instanceId === instanceId);
+  if (!targetUnit) return;
+
+  if (phase === "pick-target") {
+    if (rule.mode === "single") {
+      addLog(`${cardName} used ${actionLabel} on ${targetUnit.name} (${lane})${rule.note ? " — " + rule.note : ""}`);
+      selectedUnit = { instanceId, lane, playerNum: p }; // jump straight to its HP/damage controls
+    } else if (rule.mode === "all") {
+      addLog(`${cardName} used ${actionLabel} — confirmed ${lane} lane (${p === playerNum ? "ally" : "opposing"} side)${rule.note ? " — " + rule.note : ""}`);
+    }
+    targeting = null;
+    await saveGame();
+    return;
+  }
+
+  if (phase === "pick-unit" || phase === "pick-unit-multi") {
+    if (phase === "pick-unit") {
+      targeting = { ...targeting, phase: "pick-lane", pickedUnit: { p, lane, instanceId } };
+      render();
+    } else {
+      // capacity-multi: move it in immediately, then check if we can keep going
+      const destLane = srcLane;
+      const destPlayer = game.players[p];
+      if ((destPlayer[laneKey(destLane)] || []).length >= LANE_CAP) {
+        errorMsg = `${destLane} lane is full`; render(); return;
+      }
+      await moveUnit(p, lane, instanceId, destLane);
+      const stillRoom = (game.players[p][laneKey(destLane)] || []).length < LANE_CAP;
+      const stillEligible = computeUnitTargets(rule, playerNum, srcLane, srcId).some(t => t.lane !== destLane);
+      targeting = (stillRoom && stillEligible) ? targeting : null;
+      render();
+    }
+  }
+};
+
+// Resolves a tap on a destination-lane button.
+window.__resolveLane = async (destLane) => {
+  if (!targeting) return;
+  const { rule, cardName, actionLabel, playerNum, lane, instanceId, pickedUnit } = targeting;
+  if (pickedUnit) {
+    await moveUnit(pickedUnit.p, pickedUnit.lane, pickedUnit.instanceId, destLane);
+    addLog(`${cardName} used ${actionLabel}: moved a unit to ${destLane}`);
+  } else {
+    await moveUnit(playerNum, lane, instanceId, destLane);
+    addLog(`${cardName} used ${actionLabel}: moved to ${destLane}`);
+  }
+  targeting = null;
+  await saveGame();
+};
+
+window.__rollDie = async (sides) => {
+  const result = Math.floor(Math.random() * sides) + 1;
+  addLog(`🎲 Rolled D${sides}: ${result} — apply manually`);
+  await saveGame();
+};
+window.__flipActionCoin = async () => {
+  const result = Math.random() < 0.5 ? "Heads" : "Tails";
+  addLog(`🪙 Coin flip: ${result} — apply manually`);
+  await saveGame();
+};
+
+// Small inline roll/flip buttons for actions whose note mentions a die or coin.
+function rollerButtons(rule) {
+  if (!rule || !rule.note) return "";
+  const note = rule.note;
+  let html = "";
+  if (/D20/i.test(note)) html += `<button onclick="event.stopPropagation();window.__rollDie(20)" style="font-size:10px;padding:3px 6px;">🎲 D20</button>`;
+  else if (/D6/i.test(note)) html += `<button onclick="event.stopPropagation();window.__rollDie(6)" style="font-size:10px;padding:3px 6px;">🎲 D6</button>`;
+  if (/coin/i.test(note)) html += `<button onclick="event.stopPropagation();window.__flipActionCoin()" style="font-size:10px;padding:3px 6px;">🪙 Flip</button>`;
+  return html;
+}
+
+// ---- App state ----
+let matchId = new URLSearchParams(location.search).get("match") || "default";
+let game = null;
+let myPlayer = Number(sessionStorage.getItem("hilastone-seat-" + matchId)) || null;
+let selectedUnit = null;
+let logExpanded = false;
+let pollTimer = null;
+let modalState = null; // { mode, lane }
+let modalSearch = "";
+let errorMsg = null;
+let targeting = null; // see "Targeting engine" section below for shape
+
+const app = document.getElementById("app");
+
+async function loadGame() {
+  try {
+    const data = await fsGetDoc(matchId);
+    if (data) {
+      game = data;
+    } else {
+      game = freshGameState();
+      await fsSetDoc(matchId, game);
+    }
+  } catch (e) {
+    errorMsg = "Can't reach Firebase — check your connection. " + e.message;
+  }
+  render();
+}
+
+async function saveGame() {
+  render();
+  try {
+    await fsSetDoc(matchId, game);
+  } catch (e) {
+    errorMsg = "Sync failed, your move may not be visible to your friend yet.";
+    render();
+  }
+}
+
+function addLog(text) {
+  game.log = [...(game.log || []), { text, turn: game.turn, ts: Date.now() }].slice(-50);
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+// ---- Actions ----
+async function claimSeat(p) {
+  myPlayer = p;
+  sessionStorage.setItem("hilastone-seat-" + matchId, String(p));
+  render();
+}
+
+async function setPlayerName(p, name) {
+  game.players[p].name = name || ("Player " + p);
+  await saveGame();
+}
+
+async function adjustEnergy(p, delta) {
+  game.players[p].energy = Math.max(0, game.players[p].energy + delta);
+  addLog(`${game.players[p].name} ${delta > 0 ? "gained" : "spent"} ${Math.abs(delta)} energy`);
+  await saveGame();
+}
+
+async function addCardToHand(p, cardName) {
+  const card = cardDef(cardName);
+  if (!card) return;
+  game.players[p].hand.push({ instanceId: uid(), name: card.name });
+  addLog(`${game.players[p].name} added ${card.name} to hand`);
+  await saveGame();
+}
+
+async function summonFromHand(p, handInstanceId, lane) {
+  const player = game.players[p];
+  const lk = laneKey(lane);
+  if (player[lk].length >= LANE_CAP) { errorMsg = `${lane} lane is full`; render(); return; }
+  const idx = player.hand.findIndex(h => h.instanceId === handInstanceId);
+  if (idx === -1) return;
+  const handCard = player.hand[idx];
+  const def = cardDef(handCard.name);
+  if (!def) return;
+  if (player.energy < def.cost) { errorMsg = `Not enough energy (need ${def.cost}, have ${player.energy})`; render(); return; }
+  player.energy -= def.cost;
+  player.hand.splice(idx, 1);
+  player[lk].push(instanceFromCard(def));
+  addLog(`${player.name} summoned ${def.name} to ${lane} (${def.cost} energy)`);
+  await saveGame();
+}
+
+async function freeSummon(p, cardName, lane) {
+  const player = game.players[p];
+  const lk = laneKey(lane);
+  if (player[lk].length >= LANE_CAP) { errorMsg = `${lane} lane is full`; render(); return; }
+  const def = cardDef(cardName);
+  if (!def) return;
+  player[lk].push(instanceFromCard(def));
+  addLog(`${player.name} freely summoned ${def.name} to ${lane}`);
+  await saveGame();
+}
+
+async function adjustHp(p, lane, instanceId, delta) {
+  const player = game.players[p];
+  const lk = laneKey(lane);
+  const unit = player[lk].find(u => u.instanceId === instanceId);
+  if (!unit) return;
+  unit.hp = Math.max(0, unit.hp + delta);
+  addLog(`${unit.name} ${delta > 0 ? "gained" : "took"} ${Math.abs(delta)} HP (${unit.hp}/${unit.maxHp})`);
+  if (unit.hp <= 0) {
+    player[lk] = player[lk].filter(u => u.instanceId !== instanceId);
+    player.defeated = player.defeated || [];
+    player.defeated.push(unit.name);
+    addLog(`${unit.name} was defeated`);
+    if (selectedUnit && selectedUnit.instanceId === instanceId) selectedUnit = null;
+  }
+  await saveGame();
+}
+
+async function adjustDmgBonus(p, lane, instanceId, delta) {
+  const player = game.players[p];
+  const lk = laneKey(lane);
+  const unit = player[lk].find(u => u.instanceId === instanceId);
+  if (!unit) return;
+  unit.dmgBonus = Math.max(0, (unit.dmgBonus || 0) + delta);
+  addLog(`${unit.name} bonus damage now +${unit.dmgBonus}`);
+  await saveGame();
+}
+
+async function moveUnit(p, fromLane, instanceId, toLane) {
+  const player = game.players[p];
+  const fromKey = laneKey(fromLane), toKey = laneKey(toLane);
+  if (player[toKey].length >= LANE_CAP) { errorMsg = `${toLane} lane is full`; render(); return; }
+  const idx = player[fromKey].findIndex(u => u.instanceId === instanceId);
+  if (idx === -1) return;
+  const [unit] = player[fromKey].splice(idx, 1);
+  player[toKey].push(unit);
+  addLog(`${unit.name} moved from ${fromLane} to ${toLane}`);
+  if (selectedUnit && selectedUnit.instanceId === instanceId) selectedUnit = { ...unit, lane: toLane };
+  await saveGame();
+}
+
+async function defeatUnit(p, lane, instanceId) {
+  const player = game.players[p];
+  const lk = laneKey(lane);
+  const unit = player[lk].find(u => u.instanceId === instanceId);
+  if (!unit) return;
+  player[lk] = player[lk].filter(u => u.instanceId !== instanceId);
+  player.defeated = player.defeated || [];
+  player.defeated.push(unit.name);
+  addLog(`${unit.name} was instantly defeated`);
+  if (selectedUnit && selectedUnit.instanceId === instanceId) selectedUnit = null;
+  await saveGame();
+}
+
+async function endTurn() {
+  const next = game.activePlayer === 1 ? 2 : 1;
+  game.activePlayer = next;
+  game.players[next].energy = BASE_ENERGY;
+  if (next === 1) game.turn += 1;
+  addLog(`Turn passed to ${game.players[next].name} (Turn ${game.turn})`);
+  selectedUnit = null;
+  await saveGame();
+}
+
+async function flipCoin() {
+  const result = Math.random() < 0.5 ? 1 : 2;
+  game.activePlayer = result;
+  game.coinFlipDone = true;
+  addLog(`Coin flip: ${game.players[result].name} goes first`);
+  await saveGame();
+}
+
+async function resetGame() {
+  if (!confirm("Reset the whole match? This can't be undone.")) return;
+  game = freshGameState();
+  selectedUnit = null;
+  await saveGame();
+}
+
+// ---- Rendering ----
+function render() {
+  if (errorMsg === undefined) errorMsg = null;
+  if (!game) { app.innerHTML = `<div class="loading">Loading match...</div>`; return; }
+  if (!myPlayer) { renderSeatSelect(); return; }
+
+  const me = game.players[myPlayer];
+  const oppNum = myPlayer === 1 ? 2 : 1;
+  const opp = game.players[oppNum];
+  const isMyTurn = game.activePlayer === myPlayer;
+
+  let html = `<h1 class="sr-only">Hilastone card game live board</h1>`;
+
+  html += `<div class="topbar">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:13px;font-weight:500;">Turn ${game.turn}</span>
+      <span class="pill ${isMyTurn ? "pill-active" : "pill-idle"}">${isMyTurn ? "Your turn" : (game.players[game.activePlayer].name + "'s turn")}</span>
+    </div>
+    <div class="topbtns">
+      <button onclick="window.__switchSeat()" title="Switch seat">⇄</button>
+      <button onclick="window.__resetGame()" title="Reset match">⟲</button>
+    </div>
+  </div>`;
+
+  if (!game.coinFlipDone) {
+    html += `<button style="width:100%;margin-bottom:12px;" onclick="window.__flipCoin()">🪙 Flip coin for turn order</button>`;
+  }
+
+  if (errorMsg) {
+    html += `<div class="err"><span>${escapeHtml(errorMsg)}</span><button onclick="window.__clearError()" style="border:none;background:none;padding:0;width:auto;">✕</button></div>`;
+  }
+
+  if (targeting) {
+    const phaseHint = targeting.phase === "pick-target"
+      ? (targeting.rule.mode === "all" ? "Tap any unit in the lane you want to hit." : "Tap the unit to target.")
+      : targeting.phase === "pick-unit" ? "Tap the unit to move."
+      : targeting.phase === "pick-unit-multi" ? "Tap allies one at a time to pull them in, or cancel when done."
+      : "Tap a highlighted lane to move there.";
+    html += `<div class="targeting-banner">
+      <span>🎯 <b>${escapeHtml(targeting.cardName)}</b> — ${escapeHtml(targeting.actionLabel)}: ${escapeHtml(phaseHint)}</span>
+      <button onclick="window.__cancelTargeting()" style="border:none;background:none;padding:0 0 0 8px;width:auto;">✕ Cancel</button>
+    </div>`;
+  }
+
+  html += renderPlayerPanel("You", me, myPlayer, isMyTurn, true);
+  html += `<div class="divider"><div class="divider-line"></div><span style="font-size:14px;color:var(--text-tertiary);">⚔</span><div class="divider-line"></div></div>`;
+  html += renderPlayerPanel("Opponent", opp, oppNum, !isMyTurn, false);
+
+  if (isMyTurn) {
+    html += `<button class="end-turn-btn" onclick="window.__endTurn()">End turn</button>`;
+  }
+
+  html += `<button class="log-toggle" onclick="window.__toggleLog()">Match log ${logExpanded ? "▲" : "▼"}</button>`;
+  if (logExpanded) {
+    const logEntries = (game.log || []).slice().reverse();
+    html += `<div class="log-box">`;
+    if (logEntries.length === 0) html += `<div style="font-size:12px;color:var(--text-tertiary);">No actions yet.</div>`;
+    logEntries.forEach(entry => {
+      html += `<div class="log-line"><span class="log-turn">T${entry.turn}</span> ${escapeHtml(entry.text)}</div>`;
+    });
+    html += `</div>`;
+  }
+
+  if (modalState) html += renderModal(me, opp, myPlayer, oppNum);
+
+  app.innerHTML = html;
+}
+
+function renderSeatSelect() {
+  let html = `<div class="select-screen">
+    <h1 class="sr-only">Choose your seat</h1>
+    <p class="title">Join the match</p>
+    <p class="sub">Pick your seat. Your friend opens this same link and picks the other.</p>
+    <p class="sub" style="font-size:11px;">Share this URL: <code>${escapeHtml(location.href)}</code></p>
+    <div class="seat-btns">`;
+  [1, 2].forEach(p => {
+    const pl = game.players[p];
+    const boardCount = (pl.boardLeft || []).length + (pl.boardCenter || []).length + (pl.boardRight || []).length;
+    html += `<button class="seat-btn" onclick="window.__claimSeat(${p})">
+      ${escapeHtml(pl.name || ("Player " + p))}
+      <div class="seat-sub">${boardCount} on board · ${(pl.hand || []).length} in hand</div>
+    </button>`;
+  });
+  html += `</div></div>`;
+  app.innerHTML = html;
+}
+
+function renderPlayerPanel(label, player, playerNum, isActive, isMe) {
+  let html = `<div class="panel ${isActive ? "active" : ""}">
+    <div class="panel-head">
+      <span class="panel-name" onclick="window.__editName(${playerNum})">
+        ${isActive ? '<span class="crown">♛</span>' : ""}
+        ${escapeHtml(player.name)} ${isMe ? '<span style="color:var(--text-tertiary);font-weight:400;">(you)</span>' : ""}
+      </span>
+      <div class="energy-ctrl">
+        <button onclick="window.__adjustEnergy(${playerNum},-1)" aria-label="Decrease energy">−</button>
+        <span class="energy-val">${player.energy} EP</span>
+        <button onclick="window.__adjustEnergy(${playerNum},1)" aria-label="Increase energy">+</button>
+      </div>
+    </div>
+    <div class="lanes">`;
+
+  LANES.forEach(lane => {
+    const lk = laneKey(lane);
+    const units = player[lk] || [];
+
+    // When targeting is in "pick-lane" phase, show a destination button on
+    // every valid lane belonging to the player whose unit is being moved
+    // (the acting unit for self-moves, or the picked unit's owner otherwise).
+    let laneActionHtml = "";
+    if (targeting && targeting.phase === "pick-lane") {
+      const movingPlayer = targeting.pickedUnit ? targeting.pickedUnit.p : targeting.playerNum;
+      const srcLane = targeting.pickedUnit ? targeting.pickedUnit.lane : targeting.lane;
+      if (playerNum === movingPlayer && lane !== srcLane && destLanesFor(targeting.rule.scope, srcLane).includes(lane)) {
+        laneActionHtml = `<button class="lane-action-btn" onclick="window.__resolveLane('${lane}')">→ Move here</button>`;
+      }
+    }
+
+    html += `<div>
+      <div class="lane-label">${lane} (${units.length}/4)</div>
+      ${laneActionHtml}
+      <div class="lane-units">`;
+    units.forEach(unit => {
+      html += renderUnitCard(unit, lane, playerNum);
+    });
+    html += `<button class="summon-btn" ${units.length >= LANE_CAP ? "disabled" : ""} onclick="window.__openSummon(${playerNum},'${lane}')">+ summon</button>
+      </div>
+    </div>`;
+  });
+
+  html += `</div>
+    <div class="panel-foot">
+      <button onclick="window.__openDraw(${playerNum})">+ Add to hand</button>
+      <span style="font-size:12px;color:var(--text-tertiary);">Hand: ${(player.hand||[]).length} · Defeated: ${(player.defeated||[]).length}</span>
+    </div>`;
+
+  if (player.hand && player.hand.length > 0) {
+    html += `<div class="hand-chips">`;
+    player.hand.forEach(h => { html += `<span class="chip">${escapeHtml(h.name)}</span>`; });
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+function renderUnitCard(unit, lane, playerNum) {
+  const isSelected = selectedUnit && selectedUnit.instanceId === unit.instanceId;
+  const overhealing = unit.hp > unit.maxHp;
+  const basePct = Math.max(0, Math.min(100, (unit.hp / unit.maxHp) * 100));
+  const overflowPct = overhealing ? Math.min(100, ((unit.hp - unit.maxHp) / unit.maxHp) * 100) : 0;
+  const low = !overhealing && basePct <= 30;
+  const dmgBonus = unit.dmgBonus || 0;
+
+  // Targeting-mode highlighting: valid-target cards glow and become tappable;
+  // everything else dims out, except the acting unit itself (kept normal-looking).
+  const validKeys = currentValidTargetKeys();
+  const isValidTarget = !!(targeting && validKeys && validKeys.has(targetKey(playerNum, lane, unit.instanceId)));
+  const isActingUnit = !!(targeting && targeting.playerNum === playerNum && targeting.lane === lane && targeting.instanceId === unit.instanceId);
+  const isDimmed = !!(targeting && !isValidTarget && !isActingUnit);
+  const cardOnclick = targeting
+    ? (isValidTarget ? `onclick="window.__resolveTarget(${playerNum},'${lane}','${unit.instanceId}')"` : "")
+    : `onclick="window.__selectUnit('${unit.instanceId}','${lane}',${playerNum})"`;
+
+  let html = `<div class="unit-card ${isSelected ? "selected" : ""} ${isValidTarget ? "valid-target" : ""} ${isDimmed ? "dimmed" : ""}" ${cardOnclick}>
+    <div class="unit-top">
+      ${getCardImage(unit.name) ? `<img class="unit-thumb" src="${getCardImage(unit.name)}" alt="">` : ""}
+      <span class="unit-name">${escapeHtml(unit.name)}</span>
+      ${dmgBonus > 0 ? `<span class="badge-dmg">+${dmgBonus} dmg</span>` : ""}
+    </div>
+    <div class="hpbar-row">
+      <div class="hpbar-track">
+        <div class="hpbar-fill ${low ? "low" : ""}" style="width:${basePct}%"></div>
+        ${overhealing ? `<div class="hpbar-overflow" style="width:${overflowPct}%"></div>` : ""}
+      </div>
+      <span class="hp-text ${overhealing ? "over" : ""}">${unit.hp}/${unit.maxHp}</span>
+    </div>`;
+
+  if (isSelected) {
+    const def = cardDef(unit.name);
+    html += `<div class="unit-detail" onclick="event.stopPropagation()">
+      ${getCardImage(unit.name) ? `<img class="unit-portrait" src="${getCardImage(unit.name)}" alt="">` : ""}
+      <div class="passive-text"><b style="font-weight:500;">${escapeHtml(unit.passiveName)}:</b> ${escapeHtml(unit.passive)}</div>
+      ${def ? `
+      <div class="action-row">
+        <button class="action-btn" ${targeting ? "disabled" : ""} onclick="event.stopPropagation();window.__startTargeting(${playerNum},'${lane}','${unit.instanceId}','a1')"><span class="action-label">Action 1:</span> ${escapeHtml(def.a1)}</button>
+        ${rollerButtons((TARGETING_RULES[unit.name] || {}).a1)}
+      </div>
+      <div class="action-row">
+        <button class="action-btn" ${targeting ? "disabled" : ""} onclick="event.stopPropagation();window.__startTargeting(${playerNum},'${lane}','${unit.instanceId}','a2')"><span class="action-label">Action 2:</span> ${escapeHtml(def.a2)}</button>
+        ${rollerButtons((TARGETING_RULES[unit.name] || {}).a2)}
+      </div>
+      <div class="action-row">
+        <button class="action-btn" ${targeting ? "disabled" : ""} onclick="event.stopPropagation();window.__startTargeting(${playerNum},'${lane}','${unit.instanceId}','a3')"><span class="action-label">Action 3:</span> ${escapeHtml(def.a3)}</button>
+        ${rollerButtons((TARGETING_RULES[unit.name] || {}).a3)}
+      </div>` : ""}
+
+      <div class="detail-label">HP ${overhealing ? '<span style="color:var(--overheal);">(overhealed)</span>' : ""}</div>
+      <div class="row-btns">
+        <button onclick="window.__adjustHp(${playerNum},'${lane}','${unit.instanceId}',-1)">-1 HP</button>
+        <button onclick="window.__adjustHp(${playerNum},'${lane}','${unit.instanceId}',-5)">-5 HP</button>
+        <button onclick="window.__adjustHp(${playerNum},'${lane}','${unit.instanceId}',1)">+1 HP</button>
+        <button onclick="window.__adjustHp(${playerNum},'${lane}','${unit.instanceId}',5)">+5 HP</button>
+      </div>
+
+      <div class="detail-label">Bonus damage (next attack)</div>
+      <div class="dmg-row">
+        <button class="sq" onclick="window.__adjustDmg(${playerNum},'${lane}','${unit.instanceId}',-1)" aria-label="Decrease">−</button>
+        <span class="dmg-val">+${dmgBonus}</span>
+        <button class="sq" onclick="window.__adjustDmg(${playerNum},'${lane}','${unit.instanceId}',1)" aria-label="Increase">+</button>
+        <button style="flex:1;" onclick="window.__adjustDmg(${playerNum},'${lane}','${unit.instanceId}',2)">+2</button>
+        <button style="flex:1;" ${dmgBonus === 0 ? "disabled" : ""} onclick="window.__adjustDmg(${playerNum},'${lane}','${unit.instanceId}',${-dmgBonus})">Clear</button>
+      </div>
+
+      <div class="row-btns">`;
+    const moveLanes = unitHasFreeMoveScope(unit.name) ? LANES.filter(l => l !== lane) : getAdjacentLanes(lane);
+    moveLanes.forEach(l => {
+      html += `<button onclick="window.__moveUnit(${playerNum},'${lane}','${unit.instanceId}','${l}')">Move → ${l}</button>`;
+    });
+    html += `</div>
+      <button style="width:100%;color:var(--danger);" onclick="window.__defeatUnit(${playerNum},'${lane}','${unit.instanceId}')">☠ Instantly defeat</button>
+    </div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+function renderModal(me, opp, myPlayer, oppNum) {
+  const { mode, lane } = modalState;
+  const isHandMode = mode === "hand" || mode === "oppHand";
+  const isDrawMode = mode === "draw" || mode === "oppDraw";
+  const targetPlayer = (mode === "oppHand" || mode === "oppDraw") ? oppNum : myPlayer;
+  const hand = (mode === "hand") ? me.hand : (mode === "oppHand") ? opp.hand : null;
+
+  const filtered = CARDS.filter(c => c.name.toLowerCase().includes(modalSearch.toLowerCase()) && !c.banished);
+
+  let html = `<div class="modal-overlay" onclick="window.__closeModal()">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <span class="modal-title">${isHandMode ? `Summon to ${lane}` : "Add card to hand"}</span>
+        <button onclick="window.__closeModal()" style="width:26px;height:26px;padding:0;">✕</button>
+      </div>`;
+
+  if (isHandMode && hand && hand.length > 0) {
+    html += `<div style="margin-bottom:10px;">
+      <div class="modal-sub" style="margin-top:0;">From hand (pays energy cost)</div>
+      <div style="display:flex;flex-direction:column;gap:4px;max-height:120px;overflow-y:auto;">`;
+    hand.forEach(h => {
+      const def = cardDef(h.name);
+      html += `<button class="modal-item" onclick="window.__summonFromHand(${targetPlayer},'${h.instanceId}','${lane}')">
+        <span class="modal-item-main">${getCardImage(h.name) ? `<img class="modal-item-thumb" src="${getCardImage(h.name)}" alt="">` : ""}<span>${escapeHtml(h.name)}</span></span><span style="color:var(--text-tertiary);">${def ? def.cost : "?"} EP</span>
+      </button>`;
+    });
+    html += `</div><div class="modal-sub">Or summon free (Cordelia / Postman Mortem effects)</div></div>`;
+  }
+
+  html += `<input placeholder="Search cards..." value="${escapeHtml(modalSearch)}" oninput="window.__modalSearch(this.value)" autofocus style="margin-bottom:8px;">
+    <div class="modal-list">`;
+
+  filtered.forEach(c => {
+    const action = isDrawMode
+      ? `window.__pickToHand(${targetPlayer},'${c.name.replace(/'/g, "\\'")}')`
+      : `window.__pickFreeSummon(${targetPlayer},'${c.name.replace(/'/g, "\\'")}','${lane}')`;
+    html += `<button class="modal-item" onclick="${action}">
+      <span class="modal-item-main">${getCardImage(c.name) ? `<img class="modal-item-thumb" src="${getCardImage(c.name)}" alt="">` : ""}<span>${escapeHtml(c.name)}${c.requires ? `<span style="font-size:10px;color:var(--text-tertiary);"> (needs ${escapeHtml(c.requires)})</span>` : ""}</span></span>
+      <span style="color:var(--text-tertiary);font-size:11px;">HP ${c.hp} · ${c.cost} EP</span>
+    </button>`;
+  });
+  if (filtered.length === 0) html += `<div style="font-size:12px;color:var(--text-tertiary);text-align:center;padding:1rem 0;">No cards match</div>`;
+
+  html += `</div></div></div>`;
+  return html;
+}
+
+// ---- Global handlers (exposed for inline onclick) ----
+window.__claimSeat = claimSeat;
+window.__switchSeat = () => { myPlayer = null; render(); };
+window.__resetGame = resetGame;
+window.__flipCoin = flipCoin;
+window.__clearError = () => { errorMsg = null; render(); };
+window.__endTurn = endTurn;
+window.__toggleLog = () => { logExpanded = !logExpanded; render(); };
+window.__adjustEnergy = adjustEnergy;
+window.__adjustHp = adjustHp;
+window.__adjustDmg = adjustDmgBonus;
+window.__moveUnit = moveUnit;
+window.__defeatUnit = defeatUnit;
+window.__openSummon = (p, lane) => { modalState = { mode: p === myPlayer ? "hand" : "oppHand", lane }; modalSearch = ""; render(); };
+window.__openDraw = (p) => { modalState = { mode: p === myPlayer ? "draw" : "oppDraw", lane: null }; modalSearch = ""; render(); };
+window.__closeModal = () => { modalState = null; modalSearch = ""; render(); };
+window.__modalSearch = (v) => { modalSearch = v; render(); };
+window.__pickToHand = (p, name) => { addCardToHand(p, name); modalState = null; modalSearch = ""; };
+window.__pickFreeSummon = (p, name, lane) => { freeSummon(p, name, lane); modalState = null; modalSearch = ""; };
+window.__summonFromHand = (p, handId, lane) => { summonFromHand(p, handId, lane); modalState = null; };
+window.__selectUnit = (instanceId, lane, playerNum) => {
+  if (selectedUnit && selectedUnit.instanceId === instanceId) { selectedUnit = null; }
+  else { selectedUnit = { instanceId, lane, playerNum }; }
+  render();
+};
+window.__editName = (p) => {
+  const current = game.players[p].name;
+  const next = prompt("Player name:", current);
+  if (next !== null) setPlayerName(p, next);
+};
+
+// ---- Polling for sync ----
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const data = await fsGetDoc(matchId);
+      if (data) {
+        // Preserve locally selected unit / modal state across refresh
+        game = data;
+        render();
+      }
+    } catch (e) {
+      // Silent fail on poll — don't spam errors for transient network blips
+    }
+  }, 3000);
+}
+
+loadGame().then(startPolling);
+</script>
+</body>
+</html>
