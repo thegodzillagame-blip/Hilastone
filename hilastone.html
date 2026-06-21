@@ -236,7 +236,29 @@
   .side-col { position: sticky; top: 12px; }
 
   /* Board screen */
+  .turn-bar { padding: 10px 16px; margin-bottom: 12px; }
+  .turn-bar-inner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .turn-clock {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 6px 16px; border-radius: var(--radius-md); border: 1px solid var(--border);
+    min-width: 90px; transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  }
+  .turn-clock .tc-label { font-size: 9.5px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; font-family: 'JetBrains Mono', monospace; }
+  .turn-clock .tc-time { font-size: 20px; font-weight: 800; font-family: 'JetBrains Mono', monospace; color: var(--text-secondary); }
+  .turn-clock.active { border-color: var(--accent); box-shadow: 0 0 12px rgba(62,232,200,0.3); background: rgba(62,232,200,0.06); }
+  .turn-clock.active .tc-time { color: var(--accent); text-shadow: 0 0 10px rgba(62,232,200,0.5); }
+  .turn-clock.low .tc-time { color: var(--warn); }
+  .turn-clock.low.active { border-color: var(--warn); box-shadow: 0 0 12px rgba(255,210,63,0.35); background: rgba(255,210,63,0.06); }
+  .turn-clock.low.active .tc-time { color: var(--warn); text-shadow: 0 0 10px rgba(255,210,63,0.5); }
+  .turn-clock.out .tc-time { color: var(--danger); }
+  .turn-clock.out.active { border-color: var(--danger); box-shadow: 0 0 12px rgba(255,92,122,0.35); background: rgba(255,92,122,0.06); }
+  .turn-status { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 1; min-width: 140px; }
+  .turn-status-label { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace; }
+  .turn-waiting { font-size: 11px; color: var(--text-tertiary); font-style: italic; padding: 8px 0; }
+  #endTurnBtn { padding: 8px 18px; }
+
   .energy-row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+
   .energy-pill {
     flex: 1; min-width: 220px; border-radius: var(--radius-md);
     padding: 10px 14px;
@@ -363,7 +385,12 @@
   /* Graveyard */
   .graveyard-section { padding: 12px; margin-bottom: 14px; }
   .gy-row { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px; min-height: 40px; }
-  .gy-card { flex-shrink: 0; width: 36px; height: 36px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border-strong); filter: grayscale(0.6) brightness(0.6); opacity: 0.8; }
+  .gy-card {
+    flex-shrink: 0; width: 36px; height: 36px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border-strong);
+    filter: grayscale(0.6) brightness(0.6); opacity: 0.8; cursor: pointer;
+    transition: filter 0.12s, opacity 0.12s, transform 0.08s, border-color 0.12s;
+  }
+  .gy-card:hover { filter: grayscale(0) brightness(0.9); opacity: 1; transform: translateY(-1px); border-color: var(--accent); }
   .gy-card img { width: 100%; height: 100%; object-fit: cover; }
 
   /* Side detail panel (replaces modal for unit info) */
@@ -508,6 +535,8 @@ async function fsSetDoc(docId, obj) {
 // ---------------- Game state ----------------
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
+const TURN_CLOCK_MS = 5 * 60 * 1000; // 5 minutes per player, like a chess clock
+
 function freshGameState() {
   return {
     createdAt: Date.now(),
@@ -516,6 +545,10 @@ function freshGameState() {
       "1": { name: "Player 1", energy: BASE_ENERGY, hand: [], pool: [], boardLeft: [], boardCenter: [], boardRight: [], graveyard: [], laneDisabled: { Left: false, Center: false, Right: false }, handLocked: false, freeSummon: false },
       "2": { name: "Player 2", energy: BASE_ENERGY, hand: [], pool: [], boardLeft: [], boardCenter: [], boardRight: [], graveyard: [], laneDisabled: { Left: false, Center: false, Right: false }, handLocked: false, freeSummon: false },
     },
+    currentTurn: "1",
+    clockMs: { "1": TURN_CLOCK_MS, "2": TURN_CLOCK_MS },
+    clockRunning: false, // starts paused; first End Turn after both hands lock starts the clock
+    lastTickAt: null,
   };
 }
 
@@ -587,6 +620,10 @@ async function loadGame(silent) {
         }
       }
       if (game.phase === undefined) game.phase = "setup";
+      if (game.currentTurn === undefined) game.currentTurn = "1";
+      if (!game.clockMs) game.clockMs = { "1": TURN_CLOCK_MS, "2": TURN_CLOCK_MS };
+      if (game.clockRunning === undefined) game.clockRunning = false;
+      if (game.lastTickAt === undefined) game.lastTickAt = null;
     } else {
       game = freshGameState();
       await fsSetDoc(matchId, game);
@@ -646,6 +683,23 @@ function startPolling() {
   pollTimer = setInterval(() => loadGame(true), 2500);
 }
 
+let clockTickTimer = null;
+function startClockTick() {
+  clearInterval(clockTickTimer);
+  // Updates only the turn bar's DOM once a second so the clock visibly
+  // counts down, without re-rendering the whole board (which would risk
+  // disrupting things like an open modal or in-progress clicks elsewhere).
+  clockTickTimer = setInterval(() => {
+    if (!game || game.phase !== "playing" || !game.clockRunning) return;
+    const turnBar = document.getElementById("turnBar");
+    if (!turnBar) return;
+    const seat = String(mySeat);
+    turnBar.innerHTML = turnBarHtml(seat);
+    const endTurnBtn = document.getElementById("endTurnBtn");
+    if (endTurnBtn) endTurnBtn.onclick = () => endTurn(seat);
+  }, 1000);
+}
+
 // ---------------- Setup screen (per-seat hand building) ----------------
 function buildRandomPool(seat) {
   const shuffled = [...CARDS].sort(() => Math.random() - 0.5);
@@ -686,6 +740,9 @@ function bothLocked() {
 
 function startMatch() {
   game.phase = "playing";
+  game.currentTurn = "1";
+  game.clockRunning = true;
+  game.lastTickAt = Date.now();
   scheduleSave();
 }
 
@@ -815,6 +872,32 @@ function toggleFreeSummon(seat) {
   if (!isMine(seat)) return;
   const p = game.players[seat];
   p.freeSummon = !p.freeSummon;
+  scheduleSave();
+}
+
+// Returns each player's remaining clock time in ms, accounting for time
+// elapsed since the last save if their clock is currently running. Both
+// clients derive this independently from the same lastTickAt timestamp
+// rather than running a local countdown, so they stay in sync without
+// needing a server-side timer.
+function liveClockMs() {
+  const base = { "1": game.clockMs["1"], "2": game.clockMs["2"] };
+  if (game.clockRunning && game.lastTickAt) {
+    const elapsed = Date.now() - game.lastTickAt;
+    base[game.currentTurn] = Math.max(0, base[game.currentTurn] - elapsed);
+  }
+  return base;
+}
+
+function endTurn(seat) {
+  if (!isMine(seat)) return;
+  if (game.currentTurn !== seat) return; // can only end your own turn
+  if (game.clockRunning && game.lastTickAt) {
+    const elapsed = Date.now() - game.lastTickAt;
+    game.clockMs[seat] = Math.max(0, game.clockMs[seat] - elapsed);
+  }
+  game.currentTurn = seat === "1" ? "2" : "1";
+  game.lastTickAt = Date.now();
   scheduleSave();
 }
 
@@ -1009,6 +1092,14 @@ function renderBoard() {
   const errBox = document.getElementById("errorBox");
   if (errBox) errBox.innerHTML = errorMsg ? `<div class="errorMsg">${errorMsg}</div>` : "";
 
+  // Turn bar: whose turn it is + per-player chess clocks
+  const turnBar = document.getElementById("turnBar");
+  if (turnBar) {
+    turnBar.innerHTML = turnBarHtml(seat);
+    const endTurnBtn = document.getElementById("endTurnBtn");
+    if (endTurnBtn) endTurnBtn.onclick = () => endTurn(seat);
+  }
+
   // Energy pills
   const energyRow = document.getElementById("energyRow");
   if (energyRow) {
@@ -1044,12 +1135,21 @@ function renderBoard() {
   const gyP2 = document.getElementById("gyP2");
   if (gyP1) {
     document.getElementById("gyP1Label").textContent = `Player 1 (${p1.graveyard.length})`;
-    gyP1.innerHTML = p1.graveyard.map(n => `<div class="gy-card"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
+    gyP1.innerHTML = p1.graveyard.map((n, i) => `<div class="gy-card" data-gycard="1|${i}" title="View ${escapeHtml(n)}"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
   }
   if (gyP2) {
     document.getElementById("gyP2Label").textContent = `Player 2 (${p2.graveyard.length})`;
-    gyP2.innerHTML = p2.graveyard.map(n => `<div class="gy-card"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
+    gyP2.innerHTML = p2.graveyard.map((n, i) => `<div class="gy-card" data-gycard="2|${i}" title="View ${escapeHtml(n)}"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
   }
+  document.querySelectorAll("[data-gycard]").forEach(el => {
+    el.onclick = () => {
+      const [s, idx] = el.dataset.gycard.split("|");
+      const name = game.players[s].graveyard[Number(idx)];
+      if (!name) return;
+      modalState = { type: "viewCard", name, seat: s, graveyardIndex: Number(idx) };
+      render();
+    };
+  });
 
   // Side detail panel
   const sideCol = document.getElementById("sideCol");
@@ -1070,6 +1170,7 @@ function mountBoardSkeleton(seat) {
       </div>
     </div>
     <div id="errorBox"></div>
+    <div class="turn-bar panel" id="turnBar"></div>
 
     <div class="game-layout">
       <div class="main-col">
@@ -1158,6 +1259,39 @@ function bindHandCardEvents(seat) {
       render();
     };
   });
+}
+
+function formatClock(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function turnBarHtml(seat) {
+  const clocks = liveClockMs();
+  const active = game.currentTurn;
+  const myTurn = active === seat;
+  const p1Low = clocks["1"] <= 30000;
+  const p2Low = clocks["2"] <= 30000;
+  const p1Out = clocks["1"] <= 0;
+  const p2Out = clocks["2"] <= 0;
+  return `
+    <div class="turn-bar-inner">
+      <div class="turn-clock ${active === "1" ? "active" : ""} ${p1Out ? "out" : p1Low ? "low" : ""}">
+        <span class="tc-label">Player 1</span>
+        <span class="tc-time">${formatClock(clocks["1"])}</span>
+      </div>
+      <div class="turn-status">
+        <div class="turn-status-label">${p1Out || p2Out ? "Time's up" : `${active === seat ? "Your" : "Player " + active + "'s"} turn`}</div>
+        ${myTurn ? `<button class="primary" id="endTurnBtn">End Turn →</button>` : `<div class="turn-waiting">Waiting on Player ${active}…</div>`}
+      </div>
+      <div class="turn-clock ${active === "2" ? "active" : ""} ${p2Out ? "out" : p2Low ? "low" : ""}">
+        <span class="tc-label">Player 2</span>
+        <span class="tc-time">${formatClock(clocks["2"])}</span>
+      </div>
+    </div>
+  `;
 }
 
 function energyPillHtml(seat, p) {
@@ -1374,6 +1508,8 @@ function renderModal() {
     html = addUnitModalHtml();
   } else if (modalState.type === "summon") {
     html = summonModalHtml();
+  } else if (modalState.type === "viewCard") {
+    html = viewCardModalHtml();
   }
   // Update the existing backdrop in place if one is already mounted, instead
   // of removing and recreating it. Recreating it on every render (including
@@ -1452,6 +1588,33 @@ function summonModalHtml() {
   `;
 }
 
+function viewCardModalHtml() {
+  const { name, seat, graveyardIndex } = modalState;
+  const c = cardDef(name);
+  return `
+    <div class="modal-head">
+      <img src="${getCardImage(name)}" alt="${name}" style="width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid var(--border-strong)">
+      <div>
+        <div class="mh-title">${name}</div>
+        <div class="mh-sub">${c.pronouns || ""} · Cost ${c.cost} · HP ${c.hp}</div>
+      </div>
+      <button class="ghost icon-btn modal-close" id="closeModalBtn">✕</button>
+    </div>
+    <div class="dp-ownership-note">Defeated — Player ${seat}'s graveyard, slot ${graveyardIndex + 1}. This is a read-only reference; the card has no live HP or buffs anymore.</div>
+    <div class="dp-section">
+      <div class="dp-section-label">Passive — ${c.passiveName}</div>
+      <div class="ability-row passive"><div class="ab-label">Passive</div>${c.passive}</div>
+    </div>
+    <div class="dp-section">
+      <div class="dp-section-label">Actions</div>
+      <div class="ability-row"><div class="ab-label">Action 1 · Cost 1</div>${c.a1}</div>
+      <div class="ability-row"><div class="ab-label">Action 2 · Cost 2</div>${c.a2}</div>
+      <div class="ability-row"><div class="ab-label">Action 3 · Cost 3</div>${c.a3}</div>
+    </div>
+  `;
+}
+
+
 function bindModalEvents() {
   const closeBtn = document.getElementById("closeModalBtn");
   if (closeBtn) closeBtn.onclick = closeModal;
@@ -1471,7 +1634,7 @@ function bindModalEvents() {
 
 // ---------------- Init ----------------
 loadGame();
-if (mySeat !== null) startPolling();
+if (mySeat !== null) { startPolling(); startClockTick(); }
 </script>
 </body>
 </html>
