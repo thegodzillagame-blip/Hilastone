@@ -473,6 +473,7 @@ class Engine {
       // energy, and so Ilynn ("every turn" = every turn SHE is active, i.e.
       // her owner's own turn) doesn't also fire on the opponent's turn.
       if ((trigger === "on_turn_end_zero_energy" || trigger === "on_turn_start_self_cost") && seat !== ctx.seat) continue;
+      if (trigger === "on_turn_start" && seat !== ctx.seat) continue;
       for (const lane of LANES) {
         for (const unit of this.state.players[seat][laneKey(lane)].slice()) {
           const def = this.cardDef(unit.name);
