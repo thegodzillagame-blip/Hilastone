@@ -143,6 +143,8 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(78px, 96px));
     gap: 8px;
+    max-height: 50vh;
+    overflow-y: auto;
     padding: 4px;
     margin-bottom: 12px;
   }
@@ -1685,6 +1687,9 @@ function endTurn(seat) {
     const elapsed = Date.now() - game.lastTickAt;
     game.clockMs[seat] = Math.max(0, game.clockMs[seat] - elapsed);
   }
+  // Reset the OTHER player's clock to a full fresh turn before handing control over.
+  const nextSeat = seat === "1" ? "2" : "1";
+  game.clockMs[nextSeat] = TURN_CLOCK_MS;
   game.lastTickAt = Date.now();
   const eng = ensureEngine();
   engineAction(e => e.endTurn(seat)); // engine flips currentTurn AND fires turn-boundary passives/pending effects
