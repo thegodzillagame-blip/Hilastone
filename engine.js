@@ -410,6 +410,19 @@ class Engine {
     if (p.endedLastTurnAtZeroEnergy) {
       this.firePassiveTrigger("on_turn_end_zero_energy", { seat: seat });
     }
+    // alsoOnTurnEnd: secondary effects on on_attacked passives (Nurse Anna: heal
+    // if not attacked this turn). Fires for the seat whose turn is ending.
+    for (const lane of LANES) {
+      for (const unit of this.state.players[seat][laneKey(lane)].slice()) {
+        if (hasStatus(unit, "passive_negated")) continue;
+        const def = this.cardDef(unit.name);
+        if (!def.passive || !def.passive.alsoOnTurnEnd) continue;
+        for (const eff of def.passive.alsoOnTurnEnd) {
+          if (eff.condition === "not_attacked_this_turn" && unit.damageTakenThisTurn > 0) continue;
+          this.runOp(eff, { actorUnit: unit, actorSeat: seat, actorLane: lane, targets: {} });
+        }
+      }
+    }
     this.flushPendingEffects(seat, "turn_end");
     // Clear stuns/disables that lasted through this seat's full turn
     // (applied via "until_their_next_turn" — should expire at end of their
@@ -893,6 +906,12 @@ class Engine {
         const lane = eff.anyLane ? ((targets && targets.lane) || actorLane) : actorLane;
         return this.state.players[oppSeat][laneKey(lane)].slice();
       }
+      case "all_enemies_all_lanes": {
+        // Ninaki a3: "Deal 5 Damage to all opposing cards, regardless of lane."
+        let out = [];
+        for (const l of LANES) out = out.concat(this.state.players[oppSeat][laneKey(l)].slice());
+        return out;
+      }
       case "disabled_enemies_in_lane": {
         // Yukiko a3: "all cards in the opposing lane who are disabled in any
         // way" — currently means carrying a disable_actions status.
@@ -977,6 +996,15 @@ class Engine {
   // ---- damage / heal -------------------------------------------------------
 
   op_damage(eff, frame) {
+    // Nurse Anna a1: after moving, only hits if an enemy is present in new lane.
+    // Auto-picks the first enemy — no picker needed for a conditional 1-cost hit.
+    if (eff.condition === "enemy_in_new_lane") {
+      const oppSeat = this.opponentOf(frame.actorSeat);
+      const enemies = this.state.players[oppSeat][laneKey(frame.actorLane)];
+      if (enemies.length === 0) return;
+      this.applyDamage(enemies[0], eff.amount, frame.actorUnit, frame.actorSeat, { multiTarget: false, isSelfDamage: false });
+      return;
+    }
     const units = this.resolveTargetUnits(eff.target, frame, eff);
     let amount = eff.amount;
     if (eff.amountFromRoll) amount = (frame.ctx && frame.ctx.rollResult !== undefined) ? frame.ctx.rollResult : amount;
@@ -1003,6 +1031,7 @@ class Engine {
 
     let anyFatal = false;
     let mainTargetFatal = false;
+    let killCount = 0;
     // Snapshot continuous states for all targets BEFORE the damage loop.
     // This is critical for Peggy's "Band Together" immunity: if her allies
     // die earlier in the same all_in_lane sweep, her live ally count would
@@ -1032,7 +1061,7 @@ class Engine {
         isSelfDamage: isActorSelf,
         precomputedContinuousState: precomputedStates.get(unit.instanceId),
       });
-      if (result && result.wasFatal) { anyFatal = true; mainTargetFatal = true; }
+      if (result && result.wasFatal) { anyFatal = true; mainTargetFatal = true; killCount++; }
     }
     let selfFatal = false;
     if (eff.selfDamage) {
@@ -1055,6 +1084,12 @@ class Engine {
     }
     if (eff.onAnyFatal && anyFatal) {
       for (const sub of eff.onAnyFatal) this.runOp(sub, frame);
+    }
+    // onEachFatal: fires once per killed unit (Jacie a2: 1 energy per kill)
+    if (eff.onEachFatal && killCount > 0) {
+      for (let k = 0; k < killCount; k++) {
+        for (const sub of eff.onEachFatal) this.runOp(sub, frame);
+      }
     }
     if (eff.onSelfFatal && selfFatal) {
       for (const sub of eff.onSelfFatal) this.runOp(sub, frame);
@@ -1112,6 +1147,13 @@ class Engine {
 
     if (!isSelfDamage && hasStatus(unit, "negate_damage")) {
       this.emit("damage_blocked", { instanceId: unit.instanceId, reason: "negated" });
+      return;
+    }
+    // Aegon a3: one-shot reflect — deal damage back to attacker, consume status
+    if (!isSelfDamage && attackerUnit && hasStatus(unit, "reflect_next_hit")) {
+      unit.statuses = unit.statuses.filter(function(s) { return s.kind !== "reflect_next_hit"; });
+      this.emit("damage_blocked", { instanceId: unit.instanceId, reason: "reflected" });
+      this.applyDamage(attackerUnit, baseAmount, null, null, { multiTarget: false, isSelfDamage: false });
       return;
     }
 
@@ -1360,6 +1402,10 @@ class Engine {
             expires: { type: "next_attack" },
           });
         }
+      } else {
+        // Generic fallthrough: any other on_attacked op (e.g. Nurse Anna's
+        // stacking buff_damage) dispatched with the defender as actor.
+        this.runOp(eff, { actorUnit: defender, actorSeat: found.seat, actorLane: found.lane, targets: {} });
       }
     }
     return negated;
@@ -1695,6 +1741,91 @@ class Engine {
       p.energy = Math.max(0, p.energy + eff.amount);
       this.emit("energy_change", { seat: targetSeat, amount: eff.amount, newTotal: p.energy });
     }
+  }
+
+  // Jacie/Venus passive: "grant 1 Energy per opposing card in the lane"
+  op_grant_energy_per_opp_in_lane(eff, frame) {
+    const oppSeat = this.opponentOf(frame.actorSeat);
+    const count = this.state.players[oppSeat][laneKey(frame.actorLane)].length;
+    if (count === 0) return;
+    this.op_grant_energy({ amount: eff.amount * count, target: eff.target || "self_player" }, frame);
+  }
+
+  // Audrey passive: "grant 2 HP to all allies per empty opp slot"
+  op_heal_per_empty_opp_slot(eff, frame) {
+    const oppSeat = this.opponentOf(frame.actorSeat);
+    const filled = this.state.players[oppSeat][laneKey(frame.actorLane)].length;
+    const empty = Math.max(0, LANE_CAP - filled);
+    if (empty === 0) return;
+    const amount = eff.amount * empty;
+    for (const ally of this.state.players[frame.actorSeat][laneKey(frame.actorLane)].slice()) {
+      const found = findUnit(this.state, ally.instanceId);
+      if (!found) continue;
+      const before = found.unit.hp;
+      found.unit.hp += amount;
+      this.emit("heal", { instanceId: ally.instanceId, amount: amount, before: before, after: found.unit.hp, temporary: false });
+    }
+  }
+
+  // Aichmo passive: "+N damage per opp in lane each turn, stacking permanently"
+  op_buff_damage_per_opp_in_lane(eff, frame) {
+    const oppSeat = this.opponentOf(frame.actorSeat);
+    const count = this.state.players[oppSeat][laneKey(frame.actorLane)].length;
+    if (count === 0) return;
+    const gain = eff.amount * count;
+    addStatus(frame.actorUnit, { kind: "buff_damage", amount: gain, expires: { type: "permanent" } });
+    this.emit("status_applied", { instanceId: frame.actorUnit.instanceId, kind: "buff_damage", amount: gain });
+  }
+
+  // Ninaki a2: "Gain N HP per enemy in lane, temporary"
+  op_heal_per_opp_in_lane(eff, frame) {
+    const oppSeat = this.opponentOf(frame.actorSeat);
+    const count = this.state.players[oppSeat][laneKey(frame.actorLane)].length;
+    if (count === 0) return;
+    this.op_heal({ amount: eff.amount * count, target: eff.target || "self", temporary: !!eff.temporary }, frame);
+  }
+
+  // Nurse Anna a3: "Grant N HP to all lane allies per own HP. Defeat self."
+  op_heal_all_allies_per_own_hp(eff, frame) {
+    const hp = frame.actorUnit.hp;
+    if (hp <= 0) return;
+    const amount = eff.amount * hp;
+    for (const ally of this.state.players[frame.actorSeat][laneKey(frame.actorLane)].slice()) {
+      if (ally.instanceId === frame.actorUnit.instanceId) continue;
+      const found = findUnit(this.state, ally.instanceId);
+      if (!found) continue;
+      const before = found.unit.hp;
+      found.unit.hp += amount;
+      this.emit("heal", { instanceId: ally.instanceId, amount: amount, before: before, after: found.unit.hp, temporary: false });
+    }
+  }
+
+  // Jacie a3: "Double current HP" — heals self by current HP amount, temporary
+  op_heal_double_current(eff, frame) {
+    const unit = frame.actorUnit;
+    const amount = unit.hp;
+    if (amount <= 0) return;
+    unit.hp += amount;
+    this.emit("heal", { instanceId: unit.instanceId, amount: amount, before: unit.hp - amount, after: unit.hp, temporary: true });
+    addStatus(unit, { kind: "temp_heal_rollback", amount: amount, expires: { type: "until_next_turn", ownerSeatAtApply: frame.actorSeat } });
+  }
+
+  // Aegon a3: apply a one-shot reflect status consumed in applyDamage
+  op_apply_reflect_once(eff, frame) {
+    addStatus(frame.actorUnit, { kind: "reflect_next_hit", expires: this.durationToExpiry(eff.duration || "until_next_turn", frame.actorSeat) });
+    this.emit("status_applied", { instanceId: frame.actorUnit.instanceId, kind: "reflect_next_hit" });
+  }
+
+  // Crumbs passive: copy chosen ally's passive and fire it as Crumbs
+  op_copy_passive(eff, frame) {
+    const choiceId = frame.targets && frame.targets.copySourceInstanceId;
+    if (!choiceId) return;
+    const found = findUnit(this.state, choiceId);
+    if (!found || found.seat !== frame.actorSeat || found.lane !== frame.actorLane) return;
+    const sourceDef = this.cardDef(found.unit.name);
+    if (!sourceDef.passive) return;
+    this.emit("copy_passive", { actorInstanceId: frame.actorUnit.instanceId, sourceInstanceId: choiceId, sourceName: found.unit.name });
+    this.runPassiveEffects(frame.actorUnit, frame.actorSeat, frame.actorLane, sourceDef, {});
   }
 
   // Reishi's coin-flip / Shelby's & Vivian's zero-energy passives: marks the
