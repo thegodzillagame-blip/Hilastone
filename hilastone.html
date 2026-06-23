@@ -358,7 +358,7 @@
   .uc-badge-negate { bottom: 18px; left: 2px; background: #00cfff; color: #05141a; }
   /* Mode indicator (Tanker Robot/Tank) — bottom centre, gold tint */
   .uc-badge-mode { bottom: 2px; left: 50%; transform: translateX(-50%); background: var(--gold); color: #1a1200; white-space: nowrap; }
-  .uc-badge-copied-passive { bottom: 2px; right: 2px; background: var(--panel-2); border: 1px solid var(--accent); padding: 1px; border-radius: 50%; width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; }
+  .uc-badge-copied-passive { bottom: 2px; right: 2px; background: var(--panel-2); border: 2px solid var(--accent); padding: 0; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
   .unit-card.selected-detail { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 0 10px rgba(62,232,200,0.45); }
   .lane-empty-slot {
     border: 1px dashed var(--border); border-radius: 8px; min-height: 56px;
@@ -2127,6 +2127,11 @@ function provideTargetUnit(clickedSeat, clickedLane, clickedInstanceId) {
     actionTargetState.collected.allyChoiceAnyLane = clickedInstanceId;
   } else if (need.kind === "copySourceInstanceId") {
     if (clickedSeat !== seat) return;
+    // Must be in the same lane as the acting unit (Crumbs' card text: "within the lane")
+    const actorFound = findUnit(game, actionTargetState.instanceId);
+    if (actorFound && clickedLane !== actorFound.lane) return;
+    // Also can't copy yourself
+    if (clickedInstanceId === actionTargetState.instanceId) return;
     actionTargetState.collected.copySourceInstanceId = clickedInstanceId;
     // For copy_passive: no action index needed — advance straight to collection.
     // For copy_ability: show the 3-action picker first.
@@ -2908,7 +2913,14 @@ function laneHtml(seat, lane) {
   const mine = isMine(seat);
   const targeting = actionTargetState && (() => {
     const need = actionTargetState.needs[actionTargetState.needIndex];
-    return need && ["singleTarget", "enemyChoiceAnyLane", "allyChoiceAnyLane", "copySourceInstanceId", "cardChoiceInstanceId"].indexOf(need.kind) >= 0;
+    if (!need) return false;
+    if (["singleTarget", "enemyChoiceAnyLane", "allyChoiceAnyLane", "copySourceInstanceId", "cardChoiceInstanceId"].indexOf(need.kind) < 0) return false;
+    // For copySourceInstanceId (Crumbs passive): only same lane as the actor, own seat, not self
+    if (need.kind === "copySourceInstanceId") {
+      const actorFound = findUnit(game, actionTargetState.instanceId);
+      if (!actorFound || lane !== actorFound.lane || seat !== actionTargetState.seat) return false;
+    }
+    return true;
   })();
   const slots = [];
   for (let i = 0; i < LANE_CAP; i++) {
@@ -2976,7 +2988,7 @@ function unitCardHtml(seat, lane, u, targetable) {
       ${hasNegate ? `<div class="uc-badge uc-badge-negate" title="Next hit negated">🛡</div>` : ""}
       ${hasReflect ? `<div class="uc-badge uc-badge-negate" title="Reflects next hit">↩</div>` : ""}
       ${unitMode ? `<div class="uc-badge uc-badge-mode" title="Current mode">${unitMode}</div>` : ""}
-      ${copiedPassiveName ? `<div class="uc-badge uc-badge-copied-passive" title="Copying ${copiedPassiveName}'s passive"><img src="${getCardImage(copiedPassiveName)}" style="width:14px;height:14px;border-radius:50%;object-fit:cover;vertical-align:middle"></div>` : ""}
+      ${copiedPassiveName ? `<div class="uc-badge uc-badge-copied-passive" title="Copying ${copiedPassiveName}'s passive">${getCardImage(copiedPassiveName) ? `<img src="${getCardImage(copiedPassiveName)}" style="width:20px;height:20px;border-radius:50%;object-fit:cover;display:block">` : `<span style="font-size:7px;font-weight:700;color:var(--accent)">${copiedPassiveName.substring(0,2).toUpperCase()}</span>`}</div>` : ""}
       <div class="uc-name">${u.name}</div>
       <div class="uc-hp"><span class="${lowHp ? "hp-low" : ""}">${u.hp}</span>/${effectiveMaxHp}${overHeal > 0 ? ` <span class="uc-overhp-tag">+${overHeal}</span>` : ""}</div>
       ${disabled ? `<div class="uc-disabled-tag">DISABLED</div>` : ""}

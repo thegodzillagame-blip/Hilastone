@@ -142,12 +142,26 @@ function expireStatusesOnTurnStart(state, seat) {
 // they even act. Called at the end of `seat`'s turn (in endTurn, before
 // starting the next player's turn).
 function expireStatusesOnTurnEnd(state, seat) {
-  for (const lane of LANES) {
-    for (const u of state.players[seat][laneKey(lane)]) {
-      u.statuses = u.statuses.filter(function (s) {
-        if (s.expires && s.expires.type === "until_turn_end" && s.expires.ownerSeatAtApply === seat) return false;
-        return true;
-      });
+  // Expire "until_turn_end" statuses for the seat whose turn is ending.
+  // IMPORTANT: borrowed_passive_op/trigger use ownerSeatAtApply=oppSeat,
+  // meaning they expire at the end of the OPPONENT's turn — so we must
+  // scan ALL units on the board, not just the expiring seat's units.
+  for (const scanSeat of ["1", "2"]) {
+    for (const lane of LANES) {
+      for (const u of state.players[scanSeat][laneKey(lane)]) {
+        const hadBorrowed = u.statuses.some(function(s) {
+          return (s.kind === "borrowed_passive_op" || s.kind === "borrowed_passive_trigger") &&
+                 s.expires && s.expires.type === "until_turn_end" && s.expires.ownerSeatAtApply === seat;
+        });
+        u.statuses = u.statuses.filter(function (s) {
+          if (s.expires && s.expires.type === "until_turn_end" && s.expires.ownerSeatAtApply === seat) return false;
+          return true;
+        });
+        // Clear the copied passive icon once all borrowed statuses have expired
+        if (hadBorrowed && !u.statuses.some(function(s) { return s.kind === "borrowed_passive_op" || s.kind === "borrowed_passive_trigger"; })) {
+          if (u.flags) u.flags.copiedPassiveName = null;
+        }
+      }
     }
   }
 }
@@ -1863,45 +1877,41 @@ class Engine {
     if (!sourceDef.passive) return;
     const pd = sourceDef.passive;
     const crumbs = frame.actorUnit;
+    const oppSeat = this.opponentOf(frame.actorSeat);
+    // Expires at the END of the opponent's next turn
+    const expiry = { type: "until_turn_end", ownerSeatAtApply: oppSeat };
     this.emit("copy_passive", { actorInstanceId: crumbs.instanceId, sourceInstanceId: choiceId, sourceName: found.unit.name });
 
     // Store the source name on Crumbs' flags so the UI can show what was copied
     crumbs.flags.copiedPassiveName = found.unit.name;
 
     if (pd.trigger === "passive_continuous") {
-      // Register each continuous effect as borrowed_passive_op so
-      // getContinuousState picks it up automatically (same as Cinwicke/Delici).
       for (const e of pd.effects) {
         addStatus(crumbs, {
           kind: "borrowed_passive_op",
-          meta: e,  // store the full effect object so all fields (value, condition, amountPer, etc.) are available
-          expires: null,
+          meta: e,
+          expires: expiry,
         });
       }
       this.emit("status_applied", { instanceId: crumbs.instanceId, kind: "borrowed_passive_op", sourceName: found.unit.name });
 
     } else if (pd.trigger === "on_place") {
-      // Fire immediately — Crumbs is already placed
       this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
 
     } else if (pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") {
-      // Fire immediately AND register as borrowed_passive_trigger so it also
-      // fires at the start of every subsequent turn (e.g. Reishi flips now
-      // AND will flip again next turn start automatically).
       this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
       addStatus(crumbs, {
         kind: "borrowed_passive_trigger",
         meta: { passiveData: pd, sourceName: found.unit.name },
-        expires: null,
+        expires: expiry,
       });
       this.emit("status_applied", { instanceId: crumbs.instanceId, kind: "borrowed_passive_trigger", sourceName: found.unit.name });
 
     } else {
-      // Event-driven: store as borrowed_passive_trigger; event handlers check it
       addStatus(crumbs, {
         kind: "borrowed_passive_trigger",
         meta: { passiveData: pd, sourceName: found.unit.name },
-        expires: null,
+        expires: expiry,
       });
       this.emit("status_applied", { instanceId: crumbs.instanceId, kind: "borrowed_passive_trigger", sourceName: found.unit.name });
     }
