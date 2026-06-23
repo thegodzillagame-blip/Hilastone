@@ -1836,6 +1836,7 @@ function computeActionNeeds(actorSeat, actorLane, action) {
     if (eff.destination === "choice") add("destination");
     if (t === "opposing_lane_choice") add("lane");
     if (eff.op === "copy_ability") { add("copySourceInstanceId"); add("copyActionIndex"); add("singleTarget", { allow: "any", optionalFollowUp: true }); }
+    if (eff.op === "copy_passive") { add("copySourceInstanceId"); }
     if (eff.op === "steal_card") add("stealCardIndex");
     if (eff.op === "modify_summon_cost") add("handCardChoice");
     if (eff.op === "summon_free") { add("summonCardChoice"); add("summonLaneChoice"); }
@@ -1899,8 +1900,15 @@ function provideTargetUnit(clickedSeat, clickedLane, clickedInstanceId) {
   } else if (need.kind === "copySourceInstanceId") {
     if (clickedSeat !== seat) return;
     actionTargetState.collected.copySourceInstanceId = clickedInstanceId;
-    // immediately follow up with which of that ally's 3 actions to copy
-    advanceNeedIndexOrPromptActionPick(clickedSeat, clickedLane, clickedInstanceId);
+    // For copy_passive: no action index needed — advance straight to collection.
+    // For copy_ability: show the 3-action picker first.
+    const isCopyPassive = actionTargetState.action && actionTargetState.action.effects &&
+      actionTargetState.action.effects.some(e => e.op === "copy_passive");
+    if (isCopyPassive) {
+      advanceTargetCollection();
+    } else {
+      advanceNeedIndexOrPromptActionPick(clickedSeat, clickedLane, clickedInstanceId);
+    }
     return;
   } else if (need.kind === "cardChoiceInstanceId") {
     const found = findUnit(game, clickedInstanceId);
@@ -2919,7 +2927,11 @@ function targetPickerHtml(seat, lane, u, targeting) {
         ${[0,1,2].map(i => `<button class="action-btn" data-copyaction="${i}">${srcDef ? [srcDef.a1, srcDef.a2, srcDef.a3][i] : "Action " + (i+1)}</button>`).join("")}
       </div>`;
   } else if (need.kind === "singleTarget" || need.kind === "enemyChoiceAnyLane" || need.kind === "allyChoiceAnyLane" || need.kind === "copySourceInstanceId" || need.kind === "cardChoiceInstanceId") {
-    const label = need.kind === "copySourceInstanceId" ? "Pick an ally in this lane whose ability to copy."
+    const label = need.kind === "copySourceInstanceId" ? (
+      actionTargetState && actionTargetState.action && actionTargetState.action.effects && actionTargetState.action.effects.some(e => e.op === "copy_passive")
+        ? "Pick an ally in this lane whose Passive to copy."
+        : "Pick an ally in this lane whose ability to copy."
+    )
       : need.allow === "ally" || need.kind === "allyChoiceAnyLane" ? "Pick an ally."
       : need.kind === "cardChoiceInstanceId" ? `Pick ${need.pairNames.join(" or ")}.`
       : "Pick a target on the board.";
