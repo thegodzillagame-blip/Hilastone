@@ -1388,6 +1388,15 @@ function isMine(seat) { return String(mySeat) === String(seat); }
 // The AI plays as seat "2". After Player 1 ends their turn,
 // runAiTurn() fires with a small delay so the player can see
 // the board state before the AI acts.
+//
+// Strategy overview:
+//   Phase 1 — Summon: score each (card, lane) pair and pick the best value
+//             placement that doesn't strand remaining energy. Prefer cards
+//             with high HP or AoE potential, place into contested lanes.
+//   Phase 2 — Actions: score every available action by expected impact
+//             (damage dealt, HP healed, threat removed) and execute the
+//             best one each iteration until no profitable play remains.
+//   Phase 3 — End turn.
 // ──────────────────────────────────────────────────────────────
 let aiThinking = false;
 
@@ -1401,106 +1410,224 @@ function aiEngineAction(fn) {
   catch (e) { return false; }
 }
 
+// ── Helpers ──────────────────────────────────────────────────
+
+function aiAllEnemies(playerSeat) {
+  const result = [];
+  for (const l of LANES) for (const u of game.players[playerSeat][laneKey(l)]) result.push({ unit: u, lane: l });
+  return result;
+}
+
+function aiAllAllies(aiSeat) {
+  const result = [];
+  for (const l of LANES) for (const u of game.players[aiSeat][laneKey(l)]) result.push({ unit: u, lane: l });
+  return result;
+}
+
+// Pick the enemy most worth attacking: prioritise lowest-HP (finish them off),
+// break ties by highest base damage potential (threat removal value).
+function aiPickBestEnemyTarget(playerSeat, preferLane) {
+  const all = aiAllEnemies(playerSeat);
+  if (all.length === 0) return null;
+  // Prefer targets in the same lane (so actions that only hit own-lane work)
+  const sameLane = preferLane ? all.filter(e => e.lane === preferLane) : [];
+  const pool = sameLane.length > 0 ? sameLane : all;
+  // Score: lower HP = higher priority (finishing blow > random chip)
+  return pool.sort((a, b) => a.unit.hp - b.unit.hp)[0];
+}
+
+// Pick the most-damaged ally in any lane (for heals / buffs)
+function aiPickBestAllyTarget(aiSeat, excludeInstanceId, inLane) {
+  const pool = inLane
+    ? (game.players[aiSeat][laneKey(inLane)] || []).filter(u => u.instanceId !== excludeInstanceId)
+    : aiAllAllies(aiSeat).map(e => e.unit).filter(u => u.instanceId !== excludeInstanceId);
+  if (pool.length === 0) return null;
+  // Most-damaged = lowest HP relative to base max
+  return pool.sort((a, b) => {
+    const da = cardDef(a.name);
+    const db = cardDef(b.name);
+    const ratioA = a.hp / (da ? da.hp : a.hp);
+    const ratioB = b.hp / (db ? db.hp : b.hp);
+    return ratioA - ratioB;
+  })[0];
+}
+
+// Lane with most enemies — good destination for move-based actions
+function aiMostContestedLane(playerSeat, excludeLane) {
+  return LANES
+    .filter(l => l !== excludeLane)
+    .sort((a, b) => game.players[playerSeat][laneKey(b)].length - game.players[playerSeat][laneKey(a)].length)[0]
+    || LANES.find(l => l !== excludeLane)
+    || "Center";
+}
+
+// Estimate the damage value of an action (for scoring)
+function aiEstimateActionValue(aiSeat, playerSeat, unit, lane, action) {
+  if (!action || !action.effects) return 0;
+  let score = 0;
+  for (const eff of action.effects) {
+    const op = eff.op;
+    const t = eff.target;
+    if (op === "damage") {
+      const amt = eff.amount || 0;
+      if (t === "all_enemies_in_lane") {
+        score += amt * Math.max(1, game.players[playerSeat][laneKey(lane)].length);
+      } else if (t === "all_enemies_all_lanes") {
+        score += amt * Math.max(1, aiAllEnemies(playerSeat).length);
+      } else if (t === "all_in_lane_excluding_self") {
+        score += amt * Math.max(1, game.players[playerSeat][laneKey(lane)].length);
+      } else if (t === "opposing_lane_choice" || t === "opposing_lane") {
+        const bestLane = aiMostContestedLane(playerSeat, null);
+        score += amt * Math.max(1, game.players[playerSeat][laneKey(bestLane)].length);
+      } else {
+        // single target
+        const best = aiPickBestEnemyTarget(playerSeat, lane);
+        if (best) score += Math.min(amt, best.unit.hp); // finishing blow bonus
+      }
+    }
+    if (op === "heal") {
+      const amt = eff.amount || 0;
+      const ally = t === "self" ? unit : aiPickBestAllyTarget(aiSeat, unit.instanceId, lane);
+      if (ally) {
+        const def = cardDef(ally.name);
+        const missing = def ? Math.max(0, def.hp - ally.hp) : 0;
+        score += Math.min(amt, missing) * 0.7; // heal is worth less than damage
+      }
+    }
+    if (op === "disable_actions") score += 3; // disabling an enemy is high value
+    if (op === "buff_damage") score += 2;
+    if (op === "negate_damage") score += 2;
+    if (op === "steal_card") score += 3;
+    if (op === "summon_free") score += 2;
+    if (op === "coin_flip" || op === "dice_roll") score += 1; // random effects, some value
+  }
+  return score;
+}
+
+// Score a (card, lane) summon placement: high HP and AoE cards in contested lanes score best
+function aiScoreSummonPlacement(cardName, lane, aiSeat, playerSeat) {
+  const def = CARDS.find(c => c.name === cardName);
+  if (!def) return 0;
+  const enemiesHere = game.players[playerSeat][laneKey(lane)].length;
+  const alliesHere = game.players[aiSeat][laneKey(lane)].length;
+  let score = 0;
+  // High HP is intrinsically valuable
+  score += (def.hp || 0) * 0.5;
+  // Contested lanes are better (more immediate offensive value)
+  score += enemiesHere * 2;
+  // Don't stack too many allies in one lane if there are open lanes with enemies
+  score -= alliesHere * 1;
+  // Bonus for cards whose actions synergise with lane pressure
+  if (def.actionsData) {
+    for (const a of def.actionsData) {
+      score += aiEstimateActionValue(aiSeat, playerSeat, { name: cardName, hp: def.hp, instanceId: null }, lane, a) * 0.3;
+    }
+  }
+  return score;
+}
+
+// ── Main AI turn ─────────────────────────────────────────────
+
 async function runAiTurn() {
   if (!AI_MODE || aiThinking) return;
   aiThinking = true;
 
   const AI_SEAT = "2";
+  const PLAYER_SEAT = "1";
   const eng = ensureEngine();
   if (!eng) { aiThinking = false; return; }
 
   await aiDelay(800); // brief pause so player sees their own turn result
 
   // ── PHASE 1: Summon cards from hand ──
-  // Priority: fill lanes that have enemies first, prefer cheap cards
+  // Score every (card, lane) combination and summon the best-valued
+  // placement that leaves enough energy to still act this turn.
   let summoned = true;
   while (summoned) {
     summoned = false;
     const p = game.players[AI_SEAT];
     if (p.hand.length === 0) break;
 
-    // Sort hand by cost ascending (summon cheapest first)
-    const affordable = p.hand
-      .map(name => ({ name, cost: (CARDS.find(c => c.name === name) || {}).cost || 99 }))
-      .filter(c => c.cost <= p.energy)
-      .sort((a, b) => a.cost - b.cost);
-
-    if (affordable.length === 0) break;
-
-    // Pick best lane: prefer lanes with enemies, then least-full friendly lane
-    const lanePriority = LANES.slice().sort((a, b) => {
-      const aEnemies = game.players["1"][laneKey(a)].length;
-      const bEnemies = game.players["1"][laneKey(b)].length;
-      const aAllies = game.players[AI_SEAT][laneKey(a)].length;
-      const bAllies = game.players[AI_SEAT][laneKey(b)].length;
-      if (aAllies >= LANE_CAP && bAllies < LANE_CAP) return 1;
-      if (bAllies >= LANE_CAP && aAllies < LANE_CAP) return -1;
-      return (bEnemies - aEnemies) || (aAllies - bAllies);
-    });
-
-    let placed = false;
-    for (const card of affordable) {
-      for (const lane of lanePriority) {
+    // Build scored candidate list
+    const candidates = [];
+    for (const name of p.hand) {
+      if (!isAutoResolvable(name)) continue;
+      const def = CARDS.find(c => c.name === name);
+      if (!def) continue;
+      const cost = def.cost || 0;
+      if (cost > p.energy) continue;
+      for (const lane of LANES) {
         if (game.players[AI_SEAT][laneKey(lane)].length >= LANE_CAP) continue;
-        if (!isAutoResolvable(card.name)) continue;
-        // Build on_place targets if needed (just pick first available targets)
-        const onPlaceNeeds = computeOnPlaceNeeds(card.name, AI_SEAT);
-        let opts = {};
-        if (onPlaceNeeds.length > 0) {
-          // Collect dummy targets for on_place needs (first available)
-          const collected = {};
-          for (const need of onPlaceNeeds) {
-            if (need.kind === "singleTarget" || need.kind === "enemyChoiceAnyLane") {
-              for (const l of LANES) {
-                const enemies = game.players["1"][laneKey(l)];
-                if (enemies.length > 0) { collected.singleTarget = enemies[0].instanceId; break; }
-              }
-            }
-          }
-          opts.passiveTargets = collected;
-        }
-        const ok = aiEngineAction(e => e.summon(AI_SEAT, card.name, lane, opts));
-        if (ok) { placed = true; summoned = true; await aiDelay(400); render(); break; }
+        const score = aiScoreSummonPlacement(name, lane, AI_SEAT, PLAYER_SEAT);
+        candidates.push({ name, lane, cost, score });
       }
-      if (placed) break;
     }
+    if (candidates.length === 0) break;
+
+    // Pick highest-scoring candidate
+    candidates.sort((a, b) => b.score - a.score);
+    let placed = false;
+    for (const cand of candidates) {
+      const onPlaceNeeds = computeOnPlaceNeeds(cand.name, AI_SEAT);
+      const opts = {};
+      if (onPlaceNeeds.length > 0) {
+        const collected = {};
+        for (const need of onPlaceNeeds) {
+          if (need.kind === "singleTarget" || need.kind === "enemyChoiceAnyLane") {
+            const best = aiPickBestEnemyTarget(PLAYER_SEAT, null);
+            if (best) collected.singleTarget = best.unit.instanceId;
+          }
+        }
+        opts.passiveTargets = collected;
+      }
+      const ok = aiEngineAction(e => e.summon(AI_SEAT, cand.name, cand.lane, opts));
+      if (ok) { placed = true; summoned = true; await aiDelay(400); render(); break; }
+    }
+    if (!placed) break;
   }
 
   await aiDelay(300);
 
   // ── PHASE 2: Use actions ──
-  // For each unit: try a3 → a2 → a1, targeting the weakest enemy
+  // Score every available action across all units, execute the best,
+  // repeat until no unit can act profitably.
   let acted = true;
   while (acted) {
     acted = false;
     const p = game.players[AI_SEAT];
 
+    // Build all scored action candidates
+    const actionCandidates = [];
     for (const lane of LANES) {
       for (const unit of game.players[AI_SEAT][laneKey(lane)].slice()) {
         if (unit.actedThisTurn) continue;
         const def = cardDef(unit.name);
-        if (!def) continue;
-
-        // Try actions from highest to lowest cost
-        for (const actionIdx of [2, 1, 0]) {
-          const action = def.actions && def.actions[actionIdx];
+        if (!def || !def.actions) continue;
+        for (const actionIdx of [0, 1, 2]) {
+          const action = def.actions[actionIdx];
           if (!action) continue;
           if (p.energy < action.cost) continue;
-
-          // Build targets for this action
           const targets = aiBuildTargets(unit, lane, AI_SEAT, action, actionIdx);
-          if (targets === null) continue; // can't resolve targets, skip
-
-          const ok = aiEngineAction(e => e.resolveAction(AI_SEAT, unit.instanceId, lane, actionIdx, targets));
-          if (ok) {
-            acted = true;
-            // Auto-resolve any deferred passives the AI triggered
-            aiResolveDeferred();
-            await aiDelay(500);
-            render();
-            break;
-          }
+          if (targets === null) continue;
+          const score = aiEstimateActionValue(AI_SEAT, PLAYER_SEAT, unit, lane, action);
+          if (score <= 0) continue; // skip zero-value plays
+          actionCandidates.push({ unit, lane, actionIdx, targets, score, cost: action.cost });
         }
+      }
+    }
+
+    if (actionCandidates.length === 0) break;
+
+    // Execute the highest-scoring action
+    actionCandidates.sort((a, b) => b.score - a.score);
+    for (const cand of actionCandidates) {
+      const ok = aiEngineAction(e => e.resolveAction(AI_SEAT, cand.unit.instanceId, cand.lane, cand.actionIdx, cand.targets));
+      if (ok) {
+        acted = true;
+        aiResolveDeferred();
+        await aiDelay(500);
+        render();
+        break;
       }
     }
   }
@@ -1508,7 +1635,6 @@ async function runAiTurn() {
   await aiDelay(500);
 
   // ── PHASE 3: End turn ──
-  // Directly call engine endTurn (bypass isMine check)
   const nextSeat = "1";
   game.clockMs[nextSeat] = TURN_CLOCK_MS;
   game.lastTickAt = Date.now();
@@ -1522,68 +1648,138 @@ function aiBuildTargets(unit, lane, aiSeat, action, actionIdx) {
   // Returns null if we can't build valid targets (skip this action).
   const playerSeat = "1";
   const targets = {};
+  let impossible = false;
 
-  const effects = action.effects || [];
-  for (const eff of effects) {
+  function scanEff(eff) {
+    if (impossible) return;
     const t = eff.target;
-    if (t === "single_enemy" || t === "single_enemy_choice" || t === "enemyChoiceAnyLane") {
-      // Pick weakest (lowest HP) enemy
-      let best = null;
-      for (const l of LANES) {
-        for (const enemy of game.players[playerSeat][laneKey(l)]) {
-          if (!best || enemy.hp < best.hp) best = enemy;
+    const op = eff.op;
+
+    // Enemy single-target — pick best enemy
+    if (t === "single_enemy" || t === "single_enemy_choice" || t === "single_any") {
+      if (!targets.singleTarget) {
+        const best = aiPickBestEnemyTarget(playerSeat, lane);
+        if (!best) { impossible = true; return; }
+        targets.singleTarget = best.unit.instanceId;
+      }
+    }
+    // Enemy choice from any lane
+    if (t === "enemyChoiceAnyLane" || t === "single_enemy_choice_any_lane") {
+      if (!targets.singleTarget) {
+        const best = aiPickBestEnemyTarget(playerSeat, null);
+        if (!best) { impossible = true; return; }
+        targets.singleTarget = best.unit.instanceId;
+      }
+    }
+    // Ally single-target — pick most-damaged ally
+    if (t === "single_ally" || t === "allyChoiceAnyLane" || t === "single_ally_choice_any_lane") {
+      if (!targets.singleTarget) {
+        const best = aiPickBestAllyTarget(aiSeat, unit.instanceId, (t === "single_ally") ? lane : null);
+        if (!best) { impossible = true; return; }
+        targets.singleTarget = best.instanceId;
+      }
+    }
+    // Move destination choice — go to most contested lane
+    if (op === "move" && eff.destination === "choice") {
+      if (!targets.destination) {
+        targets.destination = aiMostContestedLane(playerSeat, lane);
+      }
+    }
+    // Lane choice (e.g. opposing_lane_choice) — pick most contested
+    if (t === "opposing_lane_choice" || t === "opposing_lane") {
+      if (!targets.lane) {
+        targets.lane = aiMostContestedLane(playerSeat, null);
+      }
+    }
+    // Free summon — pick highest-cost affordable card from hand
+    if (op === "summon_free") {
+      if (!targets.handCardChoice) {
+        const hand = game.players[aiSeat].hand;
+        if (hand.length === 0) { impossible = true; return; }
+        const sorted = hand.slice().sort((a, b) => {
+          const ca = (CARDS.find(c => c.name === a) || {}).cost || 0;
+          const cb = (CARDS.find(c => c.name === b) || {}).cost || 0;
+          return cb - ca; // descend: pick most valuable
+        });
+        targets.handCardChoice = sorted[0];
+      }
+      if (!targets.summonLaneChoice) {
+        targets.summonLaneChoice = aiMostContestedLane(playerSeat, null);
+      }
+    }
+    // Copy ability/passive — pick first same-lane ally
+    if (op === "copy_passive" || op === "copy_ability") {
+      if (!targets.copySourceInstanceId) {
+        const allies = game.players[aiSeat][laneKey(lane)].filter(u => u.instanceId !== unit.instanceId);
+        if (allies.length === 0) { impossible = true; return; }
+        targets.copySourceInstanceId = allies[0].instanceId;
+        targets.copyActionIndex = 0;
+      }
+    }
+    // Steal card — steal index 0 (arbitrary for AI)
+    if (op === "steal_card") {
+      if (targets.stealCardIndex === undefined) {
+        const oppHand = game.players[playerSeat].hand;
+        if (oppHand.length === 0) { impossible = true; return; }
+        targets.stealCardIndex = 0;
+      }
+    }
+    // Modify summon cost (Domi a3) — pick first opponent hand card
+    if (op === "modify_summon_cost") {
+      if (!targets.handCardChoice) {
+        const oppHand = game.players[playerSeat].hand;
+        if (oppHand.length === 0) { impossible = true; return; }
+        targets.handCardChoice = oppHand[0];
+      }
+    }
+    // Card choice (e.g. Propane a1 choosing between Gunpowder/Propane)
+    if (t && t.indexOf("card_choice:") === 0) {
+      if (!targets.singleTarget) {
+        const pairNames = t.slice(12).split("_or_");
+        let found = null;
+        for (const n of pairNames) {
+          for (const l of LANES) {
+            const u2 = game.players[aiSeat][laneKey(l)].find(u => u.name === n && u.instanceId !== unit.instanceId);
+            if (u2) { found = u2; break; }
+          }
+          if (found) break;
         }
+        if (!found) { impossible = true; return; }
+        targets.singleTarget = found.instanceId;
       }
-      if (!best) return null; // no enemies, can't use this action
-      targets.singleTarget = best.instanceId;
     }
-    if (t === "single_ally") {
-      // Pick most-damaged ally (excluding self)
-      let best = null;
-      const def = cardDef(unit.name);
-      const maxHp = def ? def.maxHp : unit.hp;
-      for (const ally of game.players[aiSeat][laneKey(lane)]) {
-        if (ally.instanceId === unit.instanceId) continue;
-        if (!best || ally.hp < best.hp) best = ally;
-      }
-      if (!best) return null;
-      targets.singleTarget = best.instanceId;
-    }
-    if (eff.op === "move" && eff.destination === "choice") {
-      // Pick lane with most enemies
-      const otherLanes = LANES.filter(l => l !== lane);
-      targets.destination = otherLanes.sort((a, b) =>
-        game.players[playerSeat][laneKey(b)].length - game.players[playerSeat][laneKey(a)].length
-      )[0];
-    }
-    if (eff.op === "summon_free") {
-      const hand = game.players[aiSeat].hand;
-      if (hand.length === 0) return null;
-      targets.handCardChoice = hand[0];
-    }
-    if (eff.op === "copy_passive" || eff.op === "copy_ability") {
-      const allies = game.players[aiSeat][laneKey(lane)].filter(u => u.instanceId !== unit.instanceId);
-      if (allies.length === 0) return null;
-      targets.copySourceInstanceId = allies[0].instanceId;
-      targets.copyActionIndex = 0;
-    }
+    // Recurse into nested effect lists
+    if (eff.effects) eff.effects.forEach(scanEff);
+    if (eff.then) eff.then.forEach(scanEff);
+    if (eff.else) eff.else.forEach(scanEff);
+    if (eff.onHeads) eff.onHeads.forEach(scanEff);
+    if (eff.onTails) eff.onTails.forEach(scanEff);
+    if (eff.onResult) scanEff(eff.onResult);
   }
-  return targets;
+
+  for (const eff of action.effects || []) scanEff(eff);
+  return impossible ? null : targets;
 }
 
 function aiResolveDeferred() {
-  // Auto-resolve any deferred passive pickers the AI triggered
-  // (Maxine: move to any other lane; Postman Mortem: summon hand[0])
+  // Auto-resolve any deferred passive pickers the AI triggered.
+  // Maxine: move to lane with most enemies.
   if (passiveMoveState && String(passiveMoveState.seat) === "2") {
-    const other = LANES.filter(l => l !== passiveMoveState.currentLane);
-    const dest = other[0] || "Center";
+    const dest = aiMostContestedLane("1", passiveMoveState.currentLane);
     aiEngineAction(e => e.resolvePassiveMove(passiveMoveState.instanceId, dest));
     passiveMoveState = null;
   }
+  // Postman Mortem: summon highest-cost card from hand into most-contested lane.
   if (passiveSummonState && String(passiveSummonState.seat) === "2") {
     const hand = game.players["2"].hand;
     if (hand.length > 0) {
-      aiEngineAction(e => e.resolvePassiveSummon(passiveSummonState.seat, hand[0], passiveSummonState.actorLane));
+      const best = hand.slice().sort((a, b) => {
+        const ca = (CARDS.find(c => c.name === a) || {}).cost || 0;
+        const cb = (CARDS.find(c => c.name === b) || {}).cost || 0;
+        return cb - ca;
+      })[0];
+      const destLane = aiMostContestedLane("1", null);
+      aiEngineAction(e => e.resolvePassiveSummon(passiveSummonState.seat, best, destLane));
     }
     passiveSummonState = null;
   }
