@@ -1113,8 +1113,9 @@ async function fsSetDoc(docId, obj) {
 
 // ---------------- App state ----------------
 let matchId = new URLSearchParams(location.search).get("match") || "default";
+const AI_MODE = new URLSearchParams(location.search).get("mode") === "ai";
 let game = null;
-let mySeat = Number(sessionStorage.getItem("hilastone-seat-" + matchId)) || null;
+let mySeat = AI_MODE ? 1 : (Number(sessionStorage.getItem("hilastone-seat-" + matchId)) || null);
 let pollTimer = null;
 let errorMsg = null;
 let energyCorrectionOpen = null; // seat string ('1'|'2') currently showing the manual energy correction row, or null
@@ -1153,6 +1154,20 @@ function isCompatibleSave(data) {
 let lastSeenLogLength = 0; // tracks game.log.length so polling can detect new RNG events from the opponent's actions
 
 async function loadGame(silent) {
+  // In AI mode: no server, run entirely in local memory.
+  if (AI_MODE) {
+    if (!game) {
+      game = freshGameState();
+      // AI picks a random hand immediately
+      const eligible = CARDS.filter(c => !c.dlc && !c.banished);
+      const shuffled = eligible.slice().sort(() => Math.random() - 0.5);
+      game.players["2"].pool = shuffled.slice(0, HAND_SIZE).map(c => c.name);
+      game.players["2"].hand = [...game.players["2"].pool];
+      game.players["2"].handLocked = true;
+    }
+    render();
+    return;
+  }
   // Never let an incoming poll clobber edits we haven't confirmed saved yet —
   // this is what caused the rubberbanding: a poll would land mid-edit and
   // overwrite the in-memory game with stale server data.
@@ -1271,6 +1286,7 @@ async function saveGame() {
 
 function scheduleSave(isRetry) {
   dirty = true;
+  if (AI_MODE) { dirty = false; return; } // no server in AI mode
   clearTimeout(unsavedTimer);
   // Back off on repeated failures (capped at 5s) so a network outage doesn't
   // hammer Firestore with a request every 250ms.
@@ -1283,6 +1299,7 @@ function scheduleSave(isRetry) {
 
 function startPolling() {
   clearInterval(pollTimer);
+  if (AI_MODE) return; // no server to poll
   pollTimer = setInterval(() => loadGame(true), 3000);
 }
 
@@ -1334,6 +1351,8 @@ function lockHand(seat) {
   p.hand = [...p.pool];
   p.handLocked = true;
   scheduleSave();
+  // In AI mode: P2 is already locked, so auto-start the match immediately
+  if (AI_MODE && bothLocked()) { startMatch(); return; }
   render();
 }
 
@@ -1363,7 +1382,213 @@ function startMatch() {
 // for edits — only the controlling player can alter them.
 function isMine(seat) { return String(mySeat) === String(seat); }
 
-// ---------------- Board actions (engine-resolved) ----------------
+// ──────────────────────────────────────────────────────────────
+// AI SYSTEM — only active when ?mode=ai
+// The AI plays as seat "2". After Player 1 ends their turn,
+// runAiTurn() fires with a small delay so the player can see
+// the board state before the AI acts.
+// ──────────────────────────────────────────────────────────────
+let aiThinking = false;
+
+function aiDelay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function aiEngineAction(fn) {
+  // Like engineAction() but silent (no saves, no toasts) — for AI moves
+  const eng = ensureEngine();
+  if (!eng) return false;
+  try { fn(eng); return true; }
+  catch (e) { return false; }
+}
+
+async function runAiTurn() {
+  if (!AI_MODE || aiThinking) return;
+  aiThinking = true;
+
+  const AI_SEAT = "2";
+  const eng = ensureEngine();
+  if (!eng) { aiThinking = false; return; }
+
+  await aiDelay(800); // brief pause so player sees their own turn result
+
+  // ── PHASE 1: Summon cards from hand ──
+  // Priority: fill lanes that have enemies first, prefer cheap cards
+  let summoned = true;
+  while (summoned) {
+    summoned = false;
+    const p = game.players[AI_SEAT];
+    if (p.hand.length === 0) break;
+
+    // Sort hand by cost ascending (summon cheapest first)
+    const affordable = p.hand
+      .map(name => ({ name, cost: (CARDS.find(c => c.name === name) || {}).cost || 99 }))
+      .filter(c => c.cost <= p.energy)
+      .sort((a, b) => a.cost - b.cost);
+
+    if (affordable.length === 0) break;
+
+    // Pick best lane: prefer lanes with enemies, then least-full friendly lane
+    const lanePriority = LANES.slice().sort((a, b) => {
+      const aEnemies = game.players["1"][laneKey(a)].length;
+      const bEnemies = game.players["1"][laneKey(b)].length;
+      const aAllies = game.players[AI_SEAT][laneKey(a)].length;
+      const bAllies = game.players[AI_SEAT][laneKey(b)].length;
+      if (aAllies >= LANE_CAP && bAllies < LANE_CAP) return 1;
+      if (bAllies >= LANE_CAP && aAllies < LANE_CAP) return -1;
+      return (bEnemies - aEnemies) || (aAllies - bAllies);
+    });
+
+    let placed = false;
+    for (const card of affordable) {
+      for (const lane of lanePriority) {
+        if (game.players[AI_SEAT][laneKey(lane)].length >= LANE_CAP) continue;
+        if (!isAutoResolvable(card.name)) continue;
+        // Build on_place targets if needed (just pick first available targets)
+        const onPlaceNeeds = computeOnPlaceNeeds(card.name, AI_SEAT);
+        let opts = {};
+        if (onPlaceNeeds.length > 0) {
+          // Collect dummy targets for on_place needs (first available)
+          const collected = {};
+          for (const need of onPlaceNeeds) {
+            if (need.kind === "singleTarget" || need.kind === "enemyChoiceAnyLane") {
+              for (const l of LANES) {
+                const enemies = game.players["1"][laneKey(l)];
+                if (enemies.length > 0) { collected.singleTarget = enemies[0].instanceId; break; }
+              }
+            }
+          }
+          opts.passiveTargets = collected;
+        }
+        const ok = aiEngineAction(e => e.summon(AI_SEAT, card.name, lane, opts));
+        if (ok) { placed = true; summoned = true; await aiDelay(400); render(); break; }
+      }
+      if (placed) break;
+    }
+  }
+
+  await aiDelay(300);
+
+  // ── PHASE 2: Use actions ──
+  // For each unit: try a3 → a2 → a1, targeting the weakest enemy
+  let acted = true;
+  while (acted) {
+    acted = false;
+    const p = game.players[AI_SEAT];
+
+    for (const lane of LANES) {
+      for (const unit of game.players[AI_SEAT][laneKey(lane)].slice()) {
+        if (unit.actedThisTurn) continue;
+        const def = cardDef(unit.name);
+        if (!def) continue;
+
+        // Try actions from highest to lowest cost
+        for (const actionIdx of [2, 1, 0]) {
+          const action = def.actions && def.actions[actionIdx];
+          if (!action) continue;
+          if (p.energy < action.cost) continue;
+
+          // Build targets for this action
+          const targets = aiBuildTargets(unit, lane, AI_SEAT, action, actionIdx);
+          if (targets === null) continue; // can't resolve targets, skip
+
+          const ok = aiEngineAction(e => e.resolveAction(AI_SEAT, unit.instanceId, lane, actionIdx, targets));
+          if (ok) {
+            acted = true;
+            // Auto-resolve any deferred passives the AI triggered
+            aiResolveDeferred();
+            await aiDelay(500);
+            render();
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  await aiDelay(500);
+
+  // ── PHASE 3: End turn ──
+  // Directly call engine endTurn (bypass isMine check)
+  const nextSeat = "1";
+  game.clockMs[nextSeat] = TURN_CLOCK_MS;
+  game.lastTickAt = Date.now();
+  aiEngineAction(e => e.endTurn(AI_SEAT));
+  aiThinking = false;
+  render();
+}
+
+function aiBuildTargets(unit, lane, aiSeat, action, actionIdx) {
+  // Build a targets object for the AI's action.
+  // Returns null if we can't build valid targets (skip this action).
+  const playerSeat = "1";
+  const targets = {};
+
+  const effects = action.effects || [];
+  for (const eff of effects) {
+    const t = eff.target;
+    if (t === "single_enemy" || t === "single_enemy_choice" || t === "enemyChoiceAnyLane") {
+      // Pick weakest (lowest HP) enemy
+      let best = null;
+      for (const l of LANES) {
+        for (const enemy of game.players[playerSeat][laneKey(l)]) {
+          if (!best || enemy.hp < best.hp) best = enemy;
+        }
+      }
+      if (!best) return null; // no enemies, can't use this action
+      targets.singleTarget = best.instanceId;
+    }
+    if (t === "single_ally") {
+      // Pick most-damaged ally (excluding self)
+      let best = null;
+      const def = cardDef(unit.name);
+      const maxHp = def ? def.maxHp : unit.hp;
+      for (const ally of game.players[aiSeat][laneKey(lane)]) {
+        if (ally.instanceId === unit.instanceId) continue;
+        if (!best || ally.hp < best.hp) best = ally;
+      }
+      if (!best) return null;
+      targets.singleTarget = best.instanceId;
+    }
+    if (eff.op === "move" && eff.destination === "choice") {
+      // Pick lane with most enemies
+      const otherLanes = LANES.filter(l => l !== lane);
+      targets.destination = otherLanes.sort((a, b) =>
+        game.players[playerSeat][laneKey(b)].length - game.players[playerSeat][laneKey(a)].length
+      )[0];
+    }
+    if (eff.op === "summon_free") {
+      const hand = game.players[aiSeat].hand;
+      if (hand.length === 0) return null;
+      targets.handCardChoice = hand[0];
+    }
+    if (eff.op === "copy_passive" || eff.op === "copy_ability") {
+      const allies = game.players[aiSeat][laneKey(lane)].filter(u => u.instanceId !== unit.instanceId);
+      if (allies.length === 0) return null;
+      targets.copySourceInstanceId = allies[0].instanceId;
+      targets.copyActionIndex = 0;
+    }
+  }
+  return targets;
+}
+
+function aiResolveDeferred() {
+  // Auto-resolve any deferred passive pickers the AI triggered
+  // (Maxine: move to any other lane; Postman Mortem: summon hand[0])
+  if (passiveMoveState && String(passiveMoveState.seat) === "2") {
+    const other = LANES.filter(l => l !== passiveMoveState.currentLane);
+    const dest = other[0] || "Center";
+    aiEngineAction(e => e.resolvePassiveMove(passiveMoveState.instanceId, dest));
+    passiveMoveState = null;
+  }
+  if (passiveSummonState && String(passiveSummonState.seat) === "2") {
+    const hand = game.players["2"].hand;
+    if (hand.length > 0) {
+      aiEngineAction(e => e.resolvePassiveSummon(passiveSummonState.seat, hand[0], passiveSummonState.actorLane));
+    }
+    passiveSummonState = null;
+  }
+}
+
+
 // ---------------- Engine wiring ----------------
 // Builds the engine's cardDefs map (structured {hp,cost,passive,actions})
 // from the live CARDS array (which carries both display text AND the
@@ -1693,6 +1918,8 @@ function endTurn(seat) {
   game.lastTickAt = Date.now();
   const eng = ensureEngine();
   engineAction(e => e.endTurn(seat)); // engine flips currentTurn AND fires turn-boundary passives/pending effects
+  // In AI mode: if it's now the AI's turn, run it
+  if (AI_MODE && nextSeat === "2") runAiTurn();
 }
 
 function resetMatch() {
@@ -2012,7 +2239,7 @@ function render() {
   // Fresh cache for this render pass — see getContinuousStateCached() above.
   continuousStateCache.clear();
 
-  if (mySeat === null) {
+  if (mySeat === null && !AI_MODE) {
     renderSeatSelect();
     return;
   }
@@ -2145,12 +2372,12 @@ function mountSetupSkeleton(seat, p, opp) {
     body = `
       <div class="setup-card panel">
         <h2>Hand locked in ✓</h2>
-        <p class="lead">Waiting on ${opp.handLocked ? "the match to start" : "Player " + (seat === "1" ? "2" : "1") + " to finish their hand"}.</p>
+        <p class="lead">Waiting on ${AI_MODE ? "the match to start automatically" : (opp.handLocked ? "the match to start" : "Player " + (seat === "1" ? "2" : "1") + " to finish their hand")}.</p>
         <div class="hand-strip" id="lockedHandStrip">${p.hand.map(n => miniCardHtml(n)).join("")}</div>
         <button class="ghost" id="unlockBtn">Edit hand</button>
       </div>
     `;
-    if (bothLocked()) {
+    if (bothLocked() && !AI_MODE) {
       body += `<div class="setup-card panel" style="text-align:center"><button class="primary" id="startBtn" style="width:100%;padding:14px;font-size:15px">Start Match</button></div>`;
     }
   } else {
@@ -2199,7 +2426,7 @@ function mountSetupSkeleton(seat, p, opp) {
     <div id="setupRoot">
       <div class="topbar">
         <h1>Hilastone</h1>
-        <div class="topbar-right"><span class="badge">You are Player ${seat}</span></div>
+        <div class="topbar-right"><span class="badge">${AI_MODE ? "vs Computer" : "You are Player " + seat}</span></div>
       </div>
       <div id="setupErrorBox">${errorMsg ? `<div class="errorMsg">${errorMsg}</div>` : ""}</div>
       <div class="setup-screen">${body}</div>
@@ -2383,9 +2610,11 @@ function renderBoard() {
   // so we don't redundantly repaint on every render() during a running clock.
   const turnBar = document.getElementById("turnBar");
   if (turnBar) {
-    const turnKey = game.currentTurn + "|" + game.clockRunning + "|" + game.turnNumber;
+    const turnKey = game.currentTurn + "|" + game.clockRunning + "|" + game.turnNumber + "|" + (AI_MODE && aiThinking ? "ai" : "");
     if (turnBar.dataset.cacheKey !== turnKey || !document.getElementById("endTurnBtn")) {
-      turnBar.innerHTML = turnBarHtml(seat);
+      turnBar.innerHTML = (AI_MODE && aiThinking)
+        ? `<div class="turn-bar-inner"><div class="turn-status" style="color:var(--accent)">🤖 Computer is thinking…</div></div>`
+        : turnBarHtml(seat);
       turnBar.dataset.cacheKey = turnKey;
       const endTurnBtn = document.getElementById("endTurnBtn");
       if (endTurnBtn) endTurnBtn.onclick = () => endTurn(seat);

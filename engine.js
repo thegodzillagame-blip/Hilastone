@@ -423,6 +423,14 @@ class Engine {
         }
       }
     }
+    // Borrowed passive triggers for on_turn_end_zero_energy
+    if (p.endedLastTurnAtZeroEnergy) {
+      for (const lane of LANES) {
+        for (const unit of this.state.players[seat][laneKey(lane)].slice()) {
+          this.fireBorrowedTrigger(unit, seat, lane, "on_turn_end_zero_energy", { seat: seat });
+        }
+      }
+    }
     this.flushPendingEffects(seat, "turn_end");
     // Clear stuns/disables that lasted through this seat's full turn
     // (applied via "until_their_next_turn" — should expire at end of their
@@ -1226,6 +1234,11 @@ class Engine {
     const before = unit.hp;
     const wouldBeOverkill = !isSelfDamage && (before - amount) < 0;
     unit.hp = Math.max(0, unit.hp - amount);
+    // Fire on_damaged borrowed triggers (Crumbs copying Astaroth/Baelia reflect)
+    if (!isSelfDamage) {
+      const dmgFound = findUnit(this.state, unit.instanceId);
+      if (dmgFound) this.fireBorrowedTrigger(unit, dmgFound.seat, dmgFound.lane, "on_damaged", { attacker: attackerUnit, amount: amount });
+    }
     this.emit("damage", {
       instanceId: unit.instanceId, amount: amount, before: before, after: unit.hp,
       sourceInstanceId: attackerUnit ? attackerUnit.instanceId : null, multiTarget: multiTarget,
@@ -1251,9 +1264,11 @@ class Engine {
   // deal 4 Damage to all opposing cards in that lane."
   maybeMarauд(attackerUnit, defenderUnit) {
     const attackerDef = this.cardDef(attackerUnit.name);
-    if (!attackerDef.passive || attackerDef.passive.trigger !== "on_single_target_attack_hit") return;
-    if (hasStatus(attackerUnit, "passive_negated")) return;
     const attackerFound = findUnit(this.state, attackerUnit.instanceId);
+    if (!attackerFound) return;
+    // Fire borrowed on_single_target_attack_hit triggers (Crumbs copying Remington)
+    this.fireBorrowedTrigger(attackerUnit, attackerFound.seat, attackerFound.lane, "on_single_target_attack_hit", { defender: defenderUnit });
+    if (!attackerDef.passive || attackerDef.passive.trigger !== "on_single_target_attack_hit") return;
     const defenderFoundBefore = findUnit(this.state, defenderUnit.instanceId);
     if (!attackerFound || !defenderFoundBefore) return;
     const destLane = this.pickFleeLane(defenderFoundBefore.lane);
@@ -1408,6 +1423,8 @@ class Engine {
         this.runOp(eff, { actorUnit: defender, actorSeat: found.seat, actorLane: found.lane, targets: {} });
       }
     }
+    // Borrowed passive triggers (Crumbs copying e.g. Hyperion, Maxine, Ninaki)
+    this.fireBorrowedTrigger(defender, found.seat, found.lane, "on_attacked", { multiTarget: multiTarget });
     return negated;
   }
 
@@ -1534,12 +1551,14 @@ class Engine {
       for (const lane of LANES) {
         for (const watcher of this.state.players[seat][laneKey(lane)].slice()) {
           if (watcher.instanceId === movedUnit.instanceId) continue;
-          const def = this.cardDef(watcher.name);
-          if (!def.passive || def.passive.trigger !== "on_lane_boundary_cross") continue;
-          if (hasStatus(watcher, "passive_negated")) continue;
           const crossedIn = lane === toLane;
           const crossedOut = lane === fromLane;
           if (!crossedIn && !crossedOut) continue;
+          // Fire borrowed on_lane_boundary_cross triggers (Crumbs copying Yure)
+          this.fireBorrowedTrigger(watcher, seat, lane, "on_lane_boundary_cross", { movedUnit: movedUnit });
+          const def = this.cardDef(watcher.name);
+          if (!def.passive || def.passive.trigger !== "on_lane_boundary_cross") continue;
+          if (hasStatus(watcher, "passive_negated")) continue;
           for (const eff of def.passive.effects) {
             this.runOp(eff, { actorUnit: watcher, actorSeat: seat, actorLane: lane, targets: { singleTarget: movedUnit.instanceId } });
           }
@@ -1824,8 +1843,46 @@ class Engine {
     if (!found || found.seat !== frame.actorSeat || found.lane !== frame.actorLane) return;
     const sourceDef = this.cardDef(found.unit.name);
     if (!sourceDef.passive) return;
-    this.emit("copy_passive", { actorInstanceId: frame.actorUnit.instanceId, sourceInstanceId: choiceId, sourceName: found.unit.name });
-    this.runPassiveEffects(frame.actorUnit, frame.actorSeat, frame.actorLane, sourceDef, {});
+    const pd = sourceDef.passive;
+    const crumbs = frame.actorUnit;
+    this.emit("copy_passive", { actorInstanceId: crumbs.instanceId, sourceInstanceId: choiceId, sourceName: found.unit.name });
+
+    if (pd.trigger === "passive_continuous") {
+      // Register each continuous effect as borrowed_passive_op so
+      // getContinuousState picks it up automatically (same as Cinwicke/Delici).
+      for (const e of pd.effects) {
+        addStatus(crumbs, {
+          kind: "borrowed_passive_op",
+          meta: { op: e.op, amount: e.amount, amountPer: e.amountPer, multiplier: e.multiplier,
+                  fraction: e.fraction, exception: e.exception, meta: e.meta },
+          expires: null,
+        });
+      }
+      this.emit("status_applied", { instanceId: crumbs.instanceId, kind: "borrowed_passive_op", sourceName: found.unit.name });
+
+    } else if (pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost" || pd.trigger === "on_place") {
+      // Fire immediately — it's the player's turn / Crumbs is already placed
+      this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
+
+    } else {
+      // Event-driven: store as borrowed_passive_trigger; event handlers check it
+      addStatus(crumbs, {
+        kind: "borrowed_passive_trigger",
+        meta: { passiveData: pd, sourceName: found.unit.name },
+        expires: null,
+      });
+      this.emit("status_applied", { instanceId: crumbs.instanceId, kind: "borrowed_passive_trigger", sourceName: found.unit.name });
+    }
+  }
+
+  // Fire any borrowed_passive_trigger statuses matching the given trigger event.
+  fireBorrowedTrigger(unit, seat, lane, trigger, ctx) {
+    if (!unit.statuses) return;
+    for (const s of unit.statuses.filter(function(st) { return st.kind === "borrowed_passive_trigger"; })) {
+      if (s.meta.passiveData.trigger !== trigger) continue;
+      var fakeDef = { passive: s.meta.passiveData };
+      this.runPassiveEffects(unit, seat, lane, fakeDef, ctx || {});
+    }
   }
 
   // Reishi's coin-flip / Shelby's & Vivian's zero-energy passives: marks the
@@ -1952,6 +2009,12 @@ class Engine {
     // meaningful pre-summon (irrelevant once already on board).
     this.applyFreeSummonOnAnyDefeat();
 
+    // Borrowed passive triggers
+    if (attackerUnit) {
+      const aFound = findUnit(this.state, attackerUnit.instanceId);
+      if (aFound) this.fireBorrowedTrigger(attackerUnit, aFound.seat, aFound.lane, "on_defeat_by_self", { defeated: unit });
+    }
+    this.fireBorrowedTrigger(unit, seat, lane, "on_defeat_self", { lane: lane });
     this.cascadeLinkedDefeats(unit.name, seat);
     return true;
   }
