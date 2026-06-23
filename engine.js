@@ -514,6 +514,12 @@ class Engine {
           this.runPassiveEffects(unit, seat, lane, def, ctx);
         }
       }
+      // Borrowed passive triggers (Crumbs copying on_turn_start passives like Reishi)
+      for (const lane of LANES) {
+        for (const unit of this.state.players[seat][laneKey(lane)].slice()) {
+          this.fireBorrowedTrigger(unit, seat, lane, trigger, ctx);
+        }
+      }
     }
   }
 
@@ -551,6 +557,11 @@ class Engine {
 
     if (action.condition && !this.checkCondition(action.condition, { actorUnit: unit, actorSeat: seat, actorLane: lane })) {
       throw new Error("Action condition not met");
+    }
+    // Crumbs (and any future card with oncePerTurn passive action): block re-use within same turn
+    if (actionIndex === "passive" && def.passive && def.passive.oncePerTurn) {
+      if (unit.counters._passiveUsed) throw new Error("Passive already used this turn");
+      unit.counters._passiveUsed = true;
     }
     if (hasStatus(unit, "disable_actions")) throw new Error("Unit is disabled");
     if (this.getContinuousState(unit).disabledByLaneController) throw new Error("Only the lane controller can act here");
@@ -1847,6 +1858,9 @@ class Engine {
     const crumbs = frame.actorUnit;
     this.emit("copy_passive", { actorInstanceId: crumbs.instanceId, sourceInstanceId: choiceId, sourceName: found.unit.name });
 
+    // Store the source name on Crumbs' flags so the UI can show what was copied
+    crumbs.flags.copiedPassiveName = found.unit.name;
+
     if (pd.trigger === "passive_continuous") {
       // Register each continuous effect as borrowed_passive_op so
       // getContinuousState picks it up automatically (same as Cinwicke/Delici).
@@ -1860,9 +1874,21 @@ class Engine {
       }
       this.emit("status_applied", { instanceId: crumbs.instanceId, kind: "borrowed_passive_op", sourceName: found.unit.name });
 
-    } else if (pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost" || pd.trigger === "on_place") {
-      // Fire immediately — it's the player's turn / Crumbs is already placed
+    } else if (pd.trigger === "on_place") {
+      // Fire immediately — Crumbs is already placed
       this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
+
+    } else if (pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") {
+      // Fire immediately AND register as borrowed_passive_trigger so it also
+      // fires at the start of every subsequent turn (e.g. Reishi flips now
+      // AND will flip again next turn start automatically).
+      this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
+      addStatus(crumbs, {
+        kind: "borrowed_passive_trigger",
+        meta: { passiveData: pd, sourceName: found.unit.name },
+        expires: null,
+      });
+      this.emit("status_applied", { instanceId: crumbs.instanceId, kind: "borrowed_passive_trigger", sourceName: found.unit.name });
 
     } else {
       // Event-driven: store as borrowed_passive_trigger; event handlers check it
