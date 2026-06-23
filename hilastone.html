@@ -358,6 +358,7 @@
   .uc-badge-negate { bottom: 18px; left: 2px; background: #00cfff; color: #05141a; }
   /* Mode indicator (Tanker Robot/Tank) — bottom centre, gold tint */
   .uc-badge-mode { bottom: 2px; left: 50%; transform: translateX(-50%); background: var(--gold); color: #1a1200; white-space: nowrap; }
+  .uc-badge-copied-passive { bottom: 2px; right: 2px; background: var(--panel-2); border: 1px solid var(--accent); padding: 1px; border-radius: 50%; width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; }
   .unit-card.selected-detail { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), 0 0 10px rgba(62,232,200,0.45); }
   .lane-empty-slot {
     border: 1px dashed var(--border); border-radius: 8px; min-height: 56px;
@@ -2485,16 +2486,18 @@ function checkWinCondition() {
   // Clock timeout: player whose time ran out loses
   for (const s of ["1", "2"]) {
     if (clocks[s] <= 0) {
-      return { winner: s === "1" ? "2" : "1", reason: "Player " + s + "'s time ran out" };
+      const winner = s === "1" ? "2" : "1";
+      return { winner, reason: "Player " + winner + " wins via timeout!" };
     }
   }
-  // No-cards rule: a player with no hand cards AND no units on the board loses
+  // No-cards rule
   for (const s of ["1", "2"]) {
     const p = game.players[s];
     const hasUnits = ["Left","Center","Right"].some(l => p["board"+l].length > 0);
     const hasHand = p.hand.length > 0;
     if (!hasUnits && !hasHand) {
-      return { winner: s === "1" ? "2" : "1", reason: "Player " + s + " has no cards left" };
+      const winner = s === "1" ? "2" : "1";
+      return { winner, reason: "Player " + winner + " wins via defeats!" };
     }
   }
   return null;
@@ -2585,10 +2588,13 @@ function renderBoard() {
       overlay.innerHTML = `
         <div class="win-card">
           <div class="win-title">${isMe ? "🏆 You Win!" : "💀 You Lose"}</div>
-          <div class="win-reason">Player ${win.winner} wins — ${win.reason}</div>
-          <button class="primary" onclick="winDismissedFor='${win.winner + win.reason}';document.getElementById('winOverlay').remove()">Dismiss</button>
+          <div class="win-reason">${win.reason}</div>
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="primary" style="flex:1" onclick="winDismissedFor='${win.winner + win.reason}';document.getElementById('winOverlay').remove()">Dismiss</button>
+            <button class="ghost" style="flex:1" onclick="if(confirm('Reset this match and start over?')){game=freshGameState();scheduleSave();render();}">Reset Match</button>
+          </div>
         </div>`;
-    } else if (!win && overlay) {
+    } else if (overlay) {
       overlay.remove();
       winDismissedFor = null;
     }
@@ -2890,26 +2896,7 @@ function energyPillHtml(seat, p) {
           <div class="ep-val">${p.energy}</div>
           ${mine ? `<div class="ep-auto-note">Resets to ${BASE_ENERGY} automatically each turn</div>` : `<div class="ep-lock-note">Controlled by Player ${seat}</div>`}
         </div>
-        ${mine
-          ? `<div class="ep-btns"><button class="ghost icon-btn" data-energycorrect="${seat}" title="Manual correction">⚙</button></div>`
-          : `<div class="ep-btns"><button class="ghost" disabled title="You can only adjust your own energy">🔒</button></div>`
-        }
       </div>
-      ${mine && energyCorrectionOpen === seat ? `
-      <div class="ep-quick-row">
-        <button class="danger" data-energy="${seat},-4">−4</button>
-        <button class="danger" data-energy="${seat},-3">−3</button>
-        <button class="danger" data-energy="${seat},-2">−2</button>
-        <button class="danger" data-energy="${seat},-1">−1</button>
-        <button class="success" data-energy="${seat},1">+1</button>
-        <button class="success" data-energy="${seat},2">+2</button>
-        <button class="success" data-energy="${seat},3">+3</button>
-        <button class="success" data-energy="${seat},4">+4</button>
-      </div>
-      <div class="ep-bottom-row">
-        <button class="ghost" data-setenergy5="${seat}">Reset to ${BASE_ENERGY}</button>
-      </div>
-      ` : ""}
     </div>
   `;
 }
@@ -2975,6 +2962,10 @@ function unitCardHtml(seat, lane, u, targetable) {
   const hasNegate = hasNegateStatus || hasNegateGate;
   // Tanker mode (Robot / Tank)
   const unitMode = u.flags && u.flags.mode;
+  // Copied passive marker (Crumbs)
+  const copiedPassiveName = u.flags && u.flags.copiedPassiveName;
+  // reflect_next_hit badge
+  const hasReflect = hasStatus(u, "reflect_next_hit");
   return `
     <div class="unit-card ${disabled ? "disabled-unit" : ""} ${mine ? "" : "locked-unit"} ${isSelected ? "selected-detail" : ""} ${targetable ? "targetable" : ""}" data-unit="${seat}|${lane}|${u.instanceId}" title="${mine ? "" : "Opponent's unit — view only"}">
       <img src="${getCardImage(u.name)}" alt="${u.name}">
@@ -2983,7 +2974,9 @@ function unitCardHtml(seat, lane, u, targetable) {
       ${overHeal > 0 ? `<div class="uc-badge uc-badge-overheal" title="Over health">♥+${overHeal}</div>` : ""}
       ${immune ? `<div class="uc-badge uc-badge-immune" title="Immune to damage">✦</div>` : ""}
       ${hasNegate ? `<div class="uc-badge uc-badge-negate" title="Next hit negated">🛡</div>` : ""}
+      ${hasReflect ? `<div class="uc-badge uc-badge-negate" title="Reflects next hit">↩</div>` : ""}
       ${unitMode ? `<div class="uc-badge uc-badge-mode" title="Current mode">${unitMode}</div>` : ""}
+      ${copiedPassiveName ? `<div class="uc-badge uc-badge-copied-passive" title="Copying ${copiedPassiveName}'s passive"><img src="${getCardImage(copiedPassiveName)}" style="width:14px;height:14px;border-radius:50%;object-fit:cover;vertical-align:middle"></div>` : ""}
       <div class="uc-name">${u.name}</div>
       <div class="uc-hp"><span class="${lowHp ? "hp-low" : ""}">${u.hp}</span>/${effectiveMaxHp}${overHeal > 0 ? ` <span class="uc-overhp-tag">+${overHeal}</span>` : ""}</div>
       ${disabled ? `<div class="uc-disabled-tag">DISABLED</div>` : ""}
@@ -3051,7 +3044,7 @@ function detailPanelHtml() {
         <div class="ability-row"><div class="ab-label">Action 3 · Cost ${def.actionsData ? def.actionsData[2].cost : 3}</div>${def.a3}</div>
       </div>
 
-      ${canControl ? genericCorrectionToolsHtml(seat, u) : ""}
+
 
       ${canControl ? `
       <div class="dp-section">
@@ -3216,20 +3209,6 @@ function targetPickerHtml(seat, lane, u, targeting) {
   }
 
   return `<div class="dp-section targeting-active">${prompt}${cancel}</div>`;
-}
-
-function genericCorrectionToolsHtml(seat, u) {
-  return `
-    <div class="dp-section">
-      <div class="dp-section-label">Manual correction <span class="dp-section-hint">(free, bypasses passives — for honor-system fixes only)</span></div>
-      <div class="correction-row">
-        <button class="ghost" data-correctheal="1" title="Can heal past max HP">+1 HP</button>
-        <button class="ghost" data-correctheal="5" title="Can heal past max HP">+5 HP</button>
-        <button class="ghost" data-correctdmg="1">−1 HP</button>
-        <button class="ghost" data-correctdmg="5">−5 HP</button>
-        <button class="ghost" data-correctdisable="1">${hasStatus(u, "disable_actions") ? "Clear disable" : "Disable"}</button>
-      </div>
-    </div>`;
 }
 
 function bindDetailPanelEvents() {

@@ -371,15 +371,7 @@ class Engine {
 
   startTurn(seat) {
     this.state.currentTurn = seat;
-    // Energy does not carry over between turns — every turn starts at a
-    // fresh BASE_ENERGY (5), same as the very first turn of the match. This
-    // must happen BEFORE any turn-start passives fire (Wheelie's +1/-1,
-    // Ilynn's +2) so those passives are layered on top of the fresh total
-    // rather than being immediately overwritten by a later reset.
     this.state.players[seat].energy = BASE_ENERGY;
-    // Carryover energy from passives that fire during the opponent's turn
-    // (e.g. Nurse Anna's Anaesthetics: gain 2 Energy when attacked — earned
-    // mid-opponent-turn, should survive into the owner's next turn).
     const carryover = this.state.players[seat]._carryoverEnergy || 0;
     if (carryover > 0) {
       this.state.players[seat].energy += carryover;
@@ -387,11 +379,26 @@ class Engine {
     }
     this.emit("energy_change", { seat: seat, amount: BASE_ENERGY + carryover, newTotal: this.state.players[seat].energy, reason: "turn_reset" });
     expireStatusesOnTurnStart(this.state, seat);
+
+    // Linnaeus: if he's in hand but Piper is gone (not in hand, not on board),
+    // he's auto-defeated — card text: "Considered defeated if Piper is unusable."
+    for (const turnSeat of ["1", "2"]) {
+      const tp = this.state.players[turnSeat];
+      if (tp.hand.includes("Linnaeus")) {
+        const piperOnBoard = LANES.some(l => tp[laneKey(l)].some(u => u.name === "Piper"));
+        const piperInHand = tp.hand.includes("Piper");
+        if (!piperOnBoard && !piperInHand) {
+          const linnIdx = tp.hand.indexOf("Linnaeus");
+          tp.hand.splice(linnIdx, 1);
+          tp.graveyard.push("Linnaeus");
+          this.emit("defeat", { instanceId: null, name: "Linnaeus", seat: turnSeat, lane: null, reason: "linked_lifecycle" });
+        }
+      }
+    }
+
     this.emit("turn_start", { seat: seat });
     this.firePassiveTrigger("on_turn_start", { seat: seat });
     this.flushPendingEffects(seat, "turn_start");
-
-    // Waning-Candle-style "every turn, grant energy but self-damage" passives
     this.firePassiveTrigger("on_turn_start_self_cost", { seat: seat });
   }
 
@@ -739,7 +746,7 @@ class Engine {
     // carrying just the op name(s) to fold in as if self-sourced.
     const borrowed = unit.statuses.filter(function (s) { return s.kind === "borrowed_passive_op"; });
     for (const b of borrowed) {
-      this.applyContinuousEffect(bag, { op: b.meta.op, amount: b.meta.amount, exception: b.meta.exception }, { sourceUnit: unit, targetUnit: unit, isSelf: true });
+      this.applyContinuousEffect(bag, b.meta, { sourceUnit: unit, targetUnit: unit, isSelf: true });
     }
 
     // Board-sourced continuous effects from OTHER units that target this one
@@ -1867,8 +1874,7 @@ class Engine {
       for (const e of pd.effects) {
         addStatus(crumbs, {
           kind: "borrowed_passive_op",
-          meta: { op: e.op, amount: e.amount, amountPer: e.amountPer, multiplier: e.multiplier,
-                  fraction: e.fraction, exception: e.exception, meta: e.meta },
+          meta: e,  // store the full effect object so all fields (value, condition, amountPer, etc.) are available
           expires: null,
         });
       }
@@ -1905,8 +1911,13 @@ class Engine {
   fireBorrowedTrigger(unit, seat, lane, trigger, ctx) {
     if (!unit.statuses) return;
     for (const s of unit.statuses.filter(function(st) { return st.kind === "borrowed_passive_trigger"; })) {
-      if (s.meta.passiveData.trigger !== trigger) continue;
-      var fakeDef = { passive: s.meta.passiveData };
+      const pd = s.meta.passiveData;
+      if (pd.trigger !== trigger) continue;
+      // on_turn_start and on_turn_start_self_cost only fire on the unit's OWN seat's turn
+      if ((pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") && ctx && ctx.seat && ctx.seat !== seat) continue;
+      // on_turn_end_zero_energy only fires for the seat whose turn is ending
+      if (pd.trigger === "on_turn_end_zero_energy" && ctx && ctx.seat && ctx.seat !== seat) continue;
+      var fakeDef = { passive: pd };
       this.runPassiveEffects(unit, seat, lane, fakeDef, ctx || {});
     }
   }
@@ -2036,9 +2047,9 @@ class Engine {
     this.applyFreeSummonOnAnyDefeat();
 
     // Borrowed passive triggers
-    if (attackerUnit) {
-      const aFound = findUnit(this.state, attackerUnit.instanceId);
-      if (aFound) this.fireBorrowedTrigger(attackerUnit, aFound.seat, aFound.lane, "on_defeat_by_self", { defeated: unit });
+    if (byUnit) {
+      const aFound = findUnit(this.state, byUnit.instanceId);
+      if (aFound) this.fireBorrowedTrigger(byUnit, aFound.seat, aFound.lane, "on_defeat_by_self", { defeated: unit });
     }
     this.fireBorrowedTrigger(unit, seat, lane, "on_defeat_self", { lane: lane });
     this.cascadeLinkedDefeats(unit.name, seat);
