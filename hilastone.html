@@ -989,7 +989,8 @@ function sfxForEvent(evType) {
     case "auto_summon_notice":
     case "auto_move_notice":
     case "passive_move_pending":
-    case "passive_summon_pending": return "alert";
+    case "passive_summon_pending":
+    case "passive_disable_pending": return "alert";
     default:                     return null;
   }
 }
@@ -1234,6 +1235,12 @@ async function loadGame(silent) {
         for (const ps of pendingSummonsPolled) {
           if (String(mySeat) === String(ps.seat) && !passiveSummonState) {
             passiveSummonState = { seat: ps.seat, cardName: ps.cardName, actorLane: ps.actorLane };
+          }
+        }
+        const pendingDisablesPolled = newEvents.filter(ev => ev.type === "passive_disable_pending");
+        for (const pd of pendingDisablesPolled) {
+          if (String(mySeat) === String(pd.seat) && !passiveDisableState) {
+            passiveDisableState = { instanceId: pd.instanceId, cardName: pd.cardName, seat: pd.seat, currentLane: pd.currentLane };
           }
         }
         // Play SFX for opponent's events that arrived via poll
@@ -1621,7 +1628,7 @@ async function runAiTurn() {
     // Execute the highest-scoring action
     actionCandidates.sort((a, b) => b.score - a.score);
     for (const cand of actionCandidates) {
-      const ok = aiEngineAction(e => e.resolveAction(AI_SEAT, cand.unit.instanceId, cand.lane, cand.actionIdx, cand.targets));
+      const ok = aiEngineAction(e => e.resolveAction(AI_SEAT, cand.unit.instanceId, cand.actionIdx, cand.targets));
       if (ok) {
         acted = true;
         aiResolveDeferred();
@@ -1656,7 +1663,8 @@ function aiBuildTargets(unit, lane, aiSeat, action, actionIdx) {
     const op = eff.op;
 
     // Enemy single-target — pick best enemy
-    if (t === "single_enemy" || t === "single_enemy_choice" || t === "single_any") {
+    // Skip for auto-resolved conditions (engine picks target itself; no singleTarget needed)
+    if ((t === "single_enemy" || t === "single_enemy_choice" || t === "single_any") && eff.condition !== "enemy_in_new_lane") {
       if (!targets.singleTarget) {
         const best = aiPickBestEnemyTarget(playerSeat, lane);
         if (!best) { impossible = true; return; }
@@ -1782,6 +1790,12 @@ function aiResolveDeferred() {
       aiEngineAction(e => e.resolvePassiveSummon(passiveSummonState.seat, best, destLane));
     }
     passiveSummonState = null;
+  }
+  // Yukiko: disable the highest-threat (lowest HP) enemy.
+  if (passiveDisableState && String(passiveDisableState.seat) === "2") {
+    const best = aiPickBestEnemyTarget("1", null);
+    aiEngineAction(e => e.resolvePassiveDisable(passiveDisableState.instanceId, best ? best.unit.instanceId : null));
+    passiveDisableState = null;
   }
 }
 
@@ -1936,6 +1950,13 @@ function engineAction(fn) {
         passiveSummonState = { seat: ps.seat, cardName: ps.cardName, actorLane: ps.actorLane };
       }
     }
+    // passive_disable_pending: Yukiko (on_move_self disable a chosen enemy)
+    const pendingDisables = newEvents.filter(ev => ev.type === "passive_disable_pending");
+    for (const pd of pendingDisables) {
+      if (String(mySeat) === String(pd.seat)) {
+        passiveDisableState = { instanceId: pd.instanceId, cardName: pd.cardName, seat: pd.seat, currentLane: pd.currentLane };
+      }
+    }
     // Keep the poll-side dedupe cursor in sync with what we just showed
     // locally, so the next loadGame() poll (which will fetch this same
     // action back from Firestore once saved) doesn't re-surface the same
@@ -1999,6 +2020,39 @@ function summonFromHand(seat, name, lane, opts) {
 // which the UI consults to know what to collect before calling this.
 function resolveCardAction(seat, instanceId, actionIndex, targets) {
   if (!isMine(seat)) return;
+  // Pre-validate: if the action uses single_enemy (lane-restricted) and the
+  // chosen target is in a different lane than the actor, silently do nothing —
+  // the engine would return [] (no damage) but would still charge the energy.
+  // This matches the "it just says no or nothing happens" UX the players want.
+  if (targets && targets.singleTarget) {
+    const actorFound = findUnit(game, instanceId);
+    const targetFound = findUnit(game, targets.singleTarget);
+    const eng = ensureEngine();
+    if (actorFound && targetFound && eng) {
+      const def = eng.cardDef(actorFound.unit.name);
+      const action = eng && def && eng.lookupAction(def, actorFound.unit, actionIndex);
+      if (action) {
+        // Walk all effects (including nested) to detect lane-restricted single_enemy
+        function hasSingleEnemyNoLane(effects) {
+          for (const e of (effects || [])) {
+            if (e.target === "single_enemy" && !e.anyLane) return true;
+            if (hasSingleEnemyNoLane(e.effects)) return true;
+            if (hasSingleEnemyNoLane(e.then)) return true;
+            if (hasSingleEnemyNoLane(e.else)) return true;
+            if (hasSingleEnemyNoLane(e.onHeads)) return true;
+            if (hasSingleEnemyNoLane(e.onTails)) return true;
+          }
+          return false;
+        }
+        if (hasSingleEnemyNoLane(action.effects) && targetFound.lane !== actorFound.lane) {
+          // Wrong lane — silently cancel, no energy spent, no toast
+          actionTargetState = null;
+          render();
+          return;
+        }
+      }
+    }
+  }
   // Same ordering fix as summonFromHand: clear actionTargetState BEFORE the
   // engine action runs, since engineAction's success path renders
   // synchronously via scheduleSave() and would otherwise paint one more
@@ -2024,6 +2078,15 @@ function submitPassiveSummon(cardName, lane) {
   const { seat } = passiveSummonState;
   passiveSummonState = null;
   engineAction(eng => eng.resolvePassiveSummon(seat, cardName, lane));
+}
+
+// Called when the player picks an enemy to disable for Yukiko's on_move_self passive.
+// targetInstanceId may be null to skip (no valid targets).
+function submitPassiveDisable(targetInstanceId) {
+  if (!passiveDisableState) return;
+  const { instanceId } = passiveDisableState;
+  passiveDisableState = null;
+  engineAction(eng => eng.resolvePassiveDisable(instanceId, targetInstanceId));
 }
 
 let _psChosenCard = null;
@@ -2197,6 +2260,7 @@ function genericBuffDamage(seat, instanceId, amount) {
 let actionTargetState = null;
 let passiveMoveState = null; // { instanceId, cardName, seat, currentLane } — set when Maxine's passive needs a lane choice
 let passiveSummonState = null; // { seat, cardName, actorLane } — set when Postman Mortem's passive needs a card+lane choice
+let passiveDisableState = null; // { instanceId, cardName, seat, currentLane } — set when Yukiko's passive needs an enemy choice
 let winDismissedFor = null;  // key of the win condition the player already dismissed; prevents re-pop on every render
 
 // Returns picker needs for a card's on_place passive (e.g. Venia's two
@@ -2251,7 +2315,10 @@ function computeActionNeeds(actorSeat, actorLane, action) {
   // Scan an effect (and its nested sub-effects for gate ops) for player-input needs.
   function scanEff(eff) {
     const t = eff.target;
-    if (t === "single_enemy" || t === "single_any") add("singleTarget", { allow: "enemy" });
+    // Skip singleTarget need for effects the engine auto-resolves without player input
+    // (e.g. Nurse Anna a1: damage with condition:"enemy_in_new_lane" auto-picks first enemy)
+    const autoResolved = eff.condition === "enemy_in_new_lane";
+    if (!autoResolved && (t === "single_enemy" || t === "single_any")) add("singleTarget", { allow: "enemy" });
     if (t === "single_ally") add("singleTarget", { allow: "ally" });
     if (t === "single_enemy_choice_any_lane") add("enemyChoiceAnyLane");
     if (t === "single_ally_choice_any_lane") add("allyChoiceAnyLane");
@@ -2362,6 +2429,34 @@ function provideCopyActionIndex(idx) {
   if (!actionTargetState) return;
   actionTargetState.collected.copyActionIndex = idx;
   actionTargetState.pendingCopySource = null;
+
+  // Now that we know which action is being copied, replace any remaining
+  // pre-computed needs (the generic optional singleTarget placeholder) with
+  // the actual needs of the chosen action. This handles cases like:
+  //   • copied action needs no target (move:self, heal:self) → skip straight to resolve
+  //   • copied action needs a target (damage:single_enemy) → show correct picker
+  const sourceInstanceId = actionTargetState.collected.copySourceInstanceId;
+  const actorFound = findUnit(game, actionTargetState.instanceId);
+  const sourceFound = sourceInstanceId && findUnit(game, sourceInstanceId);
+  if (actorFound && sourceFound) {
+    const eng = ensureEngine();
+    if (eng) {
+      const sourceDef = eng.cardDef(sourceFound.unit.name);
+      const copiedAction = sourceDef && sourceDef.actions && sourceDef.actions[idx];
+      if (copiedAction) {
+        // Strip all remaining needs from current needIndex onward (the
+        // pre-computed optional singleTarget placeholder) and replace with
+        // the real needs of the copied action.
+        const copiedNeeds = computeActionNeeds(actionTargetState.seat, actorFound.lane, copiedAction);
+        // Mark collected targets for the copy as "copiedTargets" namespace
+        // so the engine can route them to the sub-action execution.
+        // Re-map need kinds so collected values land in copiedTargets.*.
+        const remapped = copiedNeeds.map(n => Object.assign({}, n, { forCopiedAction: true }));
+        actionTargetState.needs = actionTargetState.needs.slice(0, actionTargetState.needIndex).concat(remapped);
+      }
+    }
+  }
+
   advanceTargetCollection();
 }
 
@@ -2769,6 +2864,39 @@ function renderBoard() {
         </div>`;
     } else if (psOverlay) {
       psOverlay.remove();
+    }
+  }
+
+  // Passive disable picker — shown to Yukiko's owner after she moves
+  {
+    let pdOverlay = document.getElementById("passiveDisableOverlay");
+    if (passiveDisableState && String(mySeat) === String(passiveDisableState.seat)) {
+      if (!pdOverlay) {
+        pdOverlay = document.createElement("div");
+        pdOverlay.id = "passiveDisableOverlay";
+        pdOverlay.className = "win-overlay";
+        document.body.appendChild(pdOverlay);
+      }
+      const { cardName, currentLane } = passiveDisableState;
+      // Collect all enemies as possible targets
+      const oppSeat = String(mySeat) === "1" ? "2" : "1";
+      const enemies = [];
+      for (const l of ["Left","Center","Right"]) {
+        for (const u of (game.players[oppSeat][laneKey(l)] || [])) {
+          enemies.push({ unit: u, lane: l });
+        }
+      }
+      pdOverlay.innerHTML = `
+        <div class="win-card" style="max-width:400px">
+          <div class="win-title" style="font-size:18px;color:var(--accent)">${escapeHtml(cardName)} moved!</div>
+          <div class="win-reason">Choose an enemy to disable until their next turn:</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-bottom:12px">
+            ${enemies.map(e => `<button class="ghost" style="padding:6px 10px;font-size:13px" onclick="submitPassiveDisable('${escapeHtml(e.unit.instanceId)}')">${escapeHtml(e.unit.name)} (${e.lane})</button>`).join("")}
+          </div>
+          <button class="ghost" style="width:100%;margin-top:4px;opacity:0.6" onclick="submitPassiveDisable(null)">No valid target / Skip</button>
+        </div>`;
+    } else if (pdOverlay) {
+      pdOverlay.remove();
     }
   }
 

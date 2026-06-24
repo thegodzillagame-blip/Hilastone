@@ -908,6 +908,17 @@ class Engine {
           if (eff.multiplier) bag.damageDealtMultiplier *= eff.multiplier;
         }
         break;
+      case "bonus_damage_per_graveyard":
+        // Jacie: "Deal 2 bonus Damage for every card you have in the Graveyard."
+        // Computed fresh each call so it reflects the current graveyard size.
+        if (ctx.isSelf) {
+          const foundJacie = findUnit(this.state, ctx.targetUnit.instanceId);
+          if (foundJacie) {
+            const gy = this.state.players[foundJacie.seat].graveyard || [];
+            bag.damageDealtBonus += (eff.amountPer || 0) * gy.length;
+          }
+        }
+        break;
       // free_summon_if and linked_lifecycle are board-level sweeps, not
       // per-unit stat modifiers — handled by checkLinkedSummons() and
       // cascadeLinkedDefeats() respectively, not here.
@@ -1349,6 +1360,32 @@ class Engine {
   // Clears the pending flag and executes the move.
   // Called by the UI after the player picks which card and lane to free-summon
   // following a Postman Mortem-style on_defeat_self summon_free passive.
+  // Yukiko: resolves a deferred passive disable choice after the player
+  // picks which enemy to disable post-move. targetInstanceId may be null
+  // if there are no valid targets (skip silently).
+  resolvePassiveDisable(actorInstanceId, targetInstanceId) {
+    const actorFound = findUnit(this.state, actorInstanceId);
+    if (!actorFound) return;
+    actorFound.unit.flags.pendingPassiveDisable = false;
+    if (!targetInstanceId) return;
+    const targetFound = findUnit(this.state, targetInstanceId);
+    if (!targetFound || targetFound.seat === actorFound.seat) return;
+    const def = this.cardDef(actorFound.unit.name);
+    if (!def.passive || def.passive.trigger !== "on_move_self") return;
+    if (hasStatus(actorFound.unit, "passive_negated")) return;
+    for (const eff of def.passive.effects) {
+      if (eff.op === "disable_actions") {
+        this.runOp(eff, {
+          actorUnit: actorFound.unit,
+          actorSeat: actorFound.seat,
+          actorLane: actorFound.lane,
+          targets: { singleTarget: targetInstanceId },
+          isPassive: true,
+        });
+      }
+    }
+  }
+
   resolvePassiveSummon(seat, cardName, lane) {
     const p = this.state.players[seat];
     if (!p.hand.includes(cardName)) return; // card already gone
@@ -2143,6 +2180,25 @@ class Engine {
   firePassiveTriggerSingle(unit, seat, lane, trigger) {
     const def = this.cardDef(unit.name);
     if (!def.passive || def.passive.trigger !== trigger) return;
+    if (hasStatus(unit, "passive_negated")) return;
+    // If the passive requires a player-chosen enemy (e.g. Yukiko's on_move_self
+    // disable), emit a deferred event so the UI can show a picker rather than
+    // silently resolving with no target.
+    if (trigger === "on_move_self") {
+      const needsChoice = def.passive.effects.some(function (e) {
+        return e.target === "single_enemy_choice" || e.target === "single_enemy_choice_any_lane";
+      });
+      if (needsChoice) {
+        unit.flags.pendingPassiveDisable = true;
+        this.emit("passive_disable_pending", {
+          instanceId: unit.instanceId,
+          cardName: unit.name,
+          seat: seat,
+          currentLane: lane,
+        });
+        return;
+      }
+    }
     this.runPassiveEffects(unit, seat, lane, def, {});
   }
 
@@ -2253,6 +2309,7 @@ class Engine {
   op_boost_allies_in_lane(eff, frame) { /* handled inline in op_buff_damage/op_heal via getLaneBoostMultiplier */ }
   op_free_summon_per_turn(eff, frame) { /* handled by findActiveUnitGrantingFreeSummon + summon() opt-in */ }
   op_defeat_requires_exact_zero(eff, frame) { /* handled inline in defeatUnit (Lucia) */ }
+  op_bonus_damage_per_graveyard(eff, frame) { /* handled by getContinuousState/applyContinuousEffect (Jacie) */ }
   op_mode_definition(eff, frame) { /* consulted via lookupAction()/op_switch_mode, not executed */ }
 
   // Generic if/else wrapper used throughout Phase 2 cards (Gunpowder a3,
