@@ -705,8 +705,8 @@
   <button class="audio-toggle-btn active" id="audioMainBtn" title="Audio settings">🔊</button>
 </div>
 
-<script src="hilastone-data.js"></script>
-<script src="engine.js"></script>
+<script src="hilastone-data.js?v=20250624"></script>
+<script src="engine.js?v=20250624"></script>
 <script>
 // ---------------- Constants ----------------
 // LANES, LANE_CAP, BASE_ENERGY, HAND_SIZE, TURN_CLOCK_MS now come from
@@ -1231,6 +1231,7 @@ async function loadGame(silent) {
       if (game.phase === undefined) game.phase = "setup";
       if (game.currentTurn === undefined) game.currentTurn = "1";
       if (game.turnNumber === undefined) game.turnNumber = 1;
+      if (game.forfeitedBy === undefined) game.forfeitedBy = null;
       if (!game.log) game.log = [];
       if (!game.clockMs) game.clockMs = { "1": TURN_CLOCK_MS, "2": TURN_CLOCK_MS };
       if (game.clockRunning === undefined) game.clockRunning = false;
@@ -1358,7 +1359,8 @@ function startClockTick() {
     turnBar.innerHTML = turnBarHtml(seat);
     const endTurnBtn = document.getElementById("endTurnBtn");
     if (endTurnBtn) endTurnBtn.onclick = () => endTurn(seat);
-  }, 1000);
+    const forfeitBtn1 = document.getElementById("forfeitBtn");
+    if (forfeitBtn1) forfeitBtn1.onclick = () => forfeit(seat);  }, 1000);
 }
 
 // ---------------- Setup screen (per-seat hand building) ----------------
@@ -1421,6 +1423,25 @@ function startMatch() {
 // Honor-system enforcement: a seat may only mutate its own units, lanes, and
 // energy. The opponent's pieces remain fully visible but are not clickable
 // for edits — only the controlling player can alter them.
+// Client-side Carmella check — mirrors engine.isLaneSummonBlockedByCarmella.
+// Returns true if any ACTIVE unit with block_summons_in_lane passive is in
+// the given lane (on either seat's board). Used to disable lane buttons in
+// summon pickers without needing to hit the engine.
+function isLaneSummonBlockedByCarmellaUI(lane) {
+  if (!game) return false;
+  const lk = laneKey(lane);
+  for (const s of ["1", "2"]) {
+    for (const u of (game.players[s][lk] || [])) {
+      const def = cardDef(u.name);
+      if (def && def.passiveData && def.passiveData.effects &&
+          def.passiveData.effects.some(function(e) { return e.op === "block_summons_in_lane"; })) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function isMine(seat) { return String(mySeat) === String(seat); }
 
 // ──────────────────────────────────────────────────────────────
@@ -2295,6 +2316,29 @@ function endTurn(seat) {
   if (AI_MODE && nextSeat === "2") runAiTurn();
 }
 
+// Honor-system: move a card directly from your hand to the graveyard
+// without summoning it (e.g. a card that should be removed from play).
+function defeatFromHand(seat, name) {
+  if (!isMine(seat)) return;
+  const p = game.players[seat];
+  const idx = p.hand.indexOf(name);
+  if (idx < 0) return;
+  p.hand.splice(idx, 1);
+  p.graveyard.push(name);
+  modalState = null;
+  scheduleSave();
+  render();
+}
+
+function forfeit(seat) {
+  if (!isMine(seat)) return;
+  if (!game || game.phase !== "playing") return;
+  if (!confirm("Forfeit this match? Your opponent will win.")) return;
+  game.forfeitedBy = seat;
+  scheduleSave();
+  render();
+}
+
 function resetMatch() {
   if (!confirm("Start a brand new match? This clears the board for both players.")) return;
   game = freshGameState();
@@ -2891,6 +2935,12 @@ let laneHtmlCache = new Map();
 // Called on every render so either client shows the popup as soon as conditions are met.
 function checkWinCondition() {
   if (!game || game.phase !== "playing") return null;
+  // Forfeit: one player gave up
+  if (game.forfeitedBy) {
+    const loser = String(game.forfeitedBy);
+    const winner = loser === "1" ? "2" : "1";
+    return { winner, reason: "Player " + winner + " wins via forfeit!" };
+  }
   const clocks = liveClockMs();
   // Clock timeout: player whose time ran out loses
   for (const s of ["1", "2"]) {
@@ -2972,7 +3022,10 @@ function renderBoard() {
             ${hand.map(n => `<button class="ghost" style="padding:6px 10px;font-size:13px" id="psCard_${escapeHtml(n)}" onclick="psPickCard('${escapeHtml(n)}')">${escapeHtml(n)}</button>`).join("")}
           </div>
           <div style="display:flex;gap:8px;justify-content:center" id="psLanePicker">
-            ${lanes.map(l => `<button class="primary" style="flex:1;opacity:0.4" id="psLane_${l}" disabled onclick="psPickLane('${l}')">${l}</button>`).join("")}
+            ${lanes.map(l => {
+              const carmellaBlocked = isLaneSummonBlockedByCarmellaUI(l);
+              return `<button class="primary" style="flex:1;opacity:0.4" id="psLane_${l}" disabled onclick="psPickLane('${l}')">${l}${carmellaBlocked ? " (blocked)" : ""}</button>`;
+            }).join("")}
           </div>
         </div>`;
     } else if (psOverlay) {
@@ -3058,7 +3111,7 @@ function renderBoard() {
   // so we don't redundantly repaint on every render() during a running clock.
   const turnBar = document.getElementById("turnBar");
   if (turnBar) {
-    const turnKey = game.currentTurn + "|" + game.clockRunning + "|" + game.turnNumber + "|" + (AI_MODE && aiThinking ? "ai" : "");
+    const turnKey = game.currentTurn + "|" + game.clockRunning + "|" + game.turnNumber + "|" + (AI_MODE && aiThinking ? "ai" : "") + "|" + (game.forfeitedBy || "");
     if (turnBar.dataset.cacheKey !== turnKey || !document.getElementById("endTurnBtn")) {
       turnBar.innerHTML = (AI_MODE && aiThinking)
         ? `<div class="turn-bar-inner"><div class="turn-status" style="color:var(--accent)">🤖 Computer is thinking…</div></div>`
@@ -3066,6 +3119,8 @@ function renderBoard() {
       turnBar.dataset.cacheKey = turnKey;
       const endTurnBtn = document.getElementById("endTurnBtn");
       if (endTurnBtn) endTurnBtn.onclick = () => endTurn(seat);
+      const forfeitBtn = document.getElementById("forfeitBtn");
+      if (forfeitBtn) forfeitBtn.onclick = () => forfeit(seat);
     }
   }
 
@@ -3310,6 +3365,7 @@ function turnBarHtml(seat) {
   const p2Low = clocks["2"] <= 30000;
   const p1Out = clocks["1"] <= 0;
   const p2Out = clocks["2"] <= 0;
+  const playing = game && game.phase === "playing" && !game.forfeitedBy;
   return `
     <div class="turn-bar-inner">
       <div class="turn-clock ${active === "1" ? "active" : ""} ${p1Out ? "out" : p1Low ? "low" : ""}">
@@ -3319,6 +3375,7 @@ function turnBarHtml(seat) {
       <div class="turn-status">
         <div class="turn-status-label">${p1Out || p2Out ? "Time's up" : `${active === seat ? "Your" : "Player " + active + "'s"} turn`}</div>
         ${myTurn ? `<button class="primary" id="endTurnBtn">End Turn →</button>` : `<div class="turn-waiting">Waiting on Player ${active}…</div>`}
+        ${playing ? `<button class="ghost" id="forfeitBtn" style="margin-top:4px;font-size:10px;padding:3px 10px;color:var(--danger);border-color:var(--danger);opacity:0.7">Forfeit</button>` : ""}
       </div>
       <div class="turn-clock ${active === "2" ? "active" : ""} ${p2Out ? "out" : p2Low ? "low" : ""}">
         <span class="tc-label">Player 2</span>
@@ -3618,10 +3675,19 @@ function targetPickerHtml(seat, lane, u, targeting) {
       : "Pick a target on the board.";
     prompt = `<div class="targeting-prompt">${label}</div>`;
   } else if (need.kind === "lane" || need.kind === "destination") {
+    // For destination picks, exclude the lane the unit-being-moved is CURRENTLY in
+    // (moving somewhere = must end up somewhere different). For self-moves this is
+    // the actor's lane. For ally-moves (single_ally + destination), the ally was
+    // picked first, so collected.singleTarget already tells us the ally's lane.
+    let excludeLane = lane; // actor's lane — correct for self-moves
+    if (need.kind === "destination" && actionTargetState && actionTargetState.collected.singleTarget) {
+      const movedFound = findUnit(game, actionTargetState.collected.singleTarget);
+      if (movedFound) excludeLane = movedFound.lane;
+    }
     prompt = `
       <div class="targeting-prompt">${need.kind === "destination" ? "Move to which lane?" : "Target which lane?"}</div>
       <div class="move-lane-options">
-        ${LANES.filter(l => need.kind !== "destination" || l !== lane).map(l => `<button data-pickLane="${l}">${l}</button>`).join("")}
+        ${LANES.filter(l => need.kind !== "destination" || l !== excludeLane).map(l => `<button data-pickLane="${l}">${l}</button>`).join("")}
       </div>`;
   } else if (need.kind === "stealCardIndex") {
     const oppSeat = seat === "1" ? "2" : "1";
@@ -3652,7 +3718,10 @@ function targetPickerHtml(seat, lane, u, targeting) {
       <div class="move-lane-options">
         ${LANES.map(l => {
           const full = game.players[seat][laneKey(l)].length >= LANE_CAP;
-          return `<button ${full ? "disabled" : ""} data-summonfreelane="${l}">${l}${full ? " (full)" : ""}</button>`;
+          const carmellaBlocked = isLaneSummonBlockedByCarmellaUI(l);
+          const disabled = full || carmellaBlocked;
+          const label = full ? " (full)" : carmellaBlocked ? " (blocked)" : "";
+          return `<button ${disabled ? "disabled" : ""} data-summonfreelane="${l}">${l}${label}</button>`;
         }).join("")}
       </div>`;
   }
@@ -3829,9 +3898,17 @@ function summonModalHtml() {
       <div class="move-lane-options">
         ${LANES.map(l => {
           const full = p[laneKey(l)].length >= LANE_CAP;
-          return `<button ${!afford || full ? "disabled" : ""} data-summonlane="${l}">${l}${full ? " (full)" : ""}</button>`;
+          const carmellaBlocked = isLaneSummonBlockedByCarmellaUI(l);
+          const disabled = !afford || full || carmellaBlocked;
+          const lbl = full ? " (full)" : carmellaBlocked ? " (blocked)" : "";
+          return `<button ${disabled ? "disabled" : ""} data-summonlane="${l}">${l}${lbl}</button>`;
         }).join("")}
       </div>
+    </div>
+    <div class="dp-section" style="border-top:1px solid var(--border);padding-top:10px;margin-top:4px">
+      <button class="ghost" id="defeatFromHandBtn" style="width:100%;color:var(--danger);border-color:var(--danger);font-size:12px;padding:6px">
+        Send to Graveyard (without summoning)
+      </button>
     </div>
   `;
 }
@@ -3891,6 +3968,8 @@ function bindModalEvents() {
     document.querySelectorAll("[data-summonlane]").forEach(el => {
       el.onclick = () => summonFromHand(seat, name, el.dataset.summonlane, { useCordeliaFree: !!modalState.useCordeliaFree });
     });
+    const defeatBtn = document.getElementById("defeatFromHandBtn");
+    if (defeatBtn) defeatBtn.onclick = () => defeatFromHand(seat, name);
   }
 }
 

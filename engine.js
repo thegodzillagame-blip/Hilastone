@@ -123,24 +123,32 @@ function removeStatusesById(unit, ids) {
 // these are personal to the unit's own turn cadence (matches "once per turn"
 // reading on cards like Ridley/Cinwicke/Cordelia/Kazura/Reishi).
 function expireStatusesOnTurnStart(state, seat) {
-  for (const lane of LANES) {
-    for (const u of state.players[seat][laneKey(lane)]) {
-      // Roll back temporary HP before stripping the status — temp_heal_rollback
-      // tracks exactly how much bonus HP was granted so we can remove it precisely.
-      for (const s of u.statuses) {
-        if (s.kind === "temp_heal_rollback" &&
-            s.expires && s.expires.type === "until_next_turn" &&
-            s.expires.ownerSeatAtApply === seat) {
-          u.hp = Math.max(1, u.hp - s.amount);
+  // until_next_turn and this_turn statuses can be applied to ANY unit (including
+  // enemy units — e.g. Venus a3 disables all enemies in lane until Venus's next
+  // turn). We must scan ALL units across both seats to correctly clear them.
+  for (const scanSeat of ["1", "2"]) {
+    for (const lane of LANES) {
+      for (const u of state.players[scanSeat][laneKey(lane)]) {
+        // Roll back temporary HP before stripping the status — temp_heal_rollback
+        // tracks exactly how much bonus HP was granted so we can remove it precisely.
+        for (const s of u.statuses) {
+          if (s.kind === "temp_heal_rollback" &&
+              s.expires && s.expires.type === "until_next_turn" &&
+              s.expires.ownerSeatAtApply === seat) {
+            u.hp = Math.max(1, u.hp - s.amount);
+          }
+        }
+        u.statuses = u.statuses.filter(function (s) {
+          if (s.expires && s.expires.type === "until_next_turn" && s.expires.ownerSeatAtApply === seat) return false;
+          if (s.expires && s.expires.type === "this_turn" && s.expires.ownerSeatAtApply === seat) return false;
+          return true;
+        });
+        // Only reset counters and damageTakenThisTurn for the seat whose turn is starting
+        if (scanSeat === seat) {
+          u.counters = {};
+          u.damageTakenThisTurn = 0;
         }
       }
-      u.statuses = u.statuses.filter(function (s) {
-        if (s.expires && s.expires.type === "until_next_turn" && s.expires.ownerSeatAtApply === seat) return false;
-        if (s.expires && s.expires.type === "this_turn" && s.expires.ownerSeatAtApply === seat) return false;
-        return true;
-      });
-      u.counters = {};
-      u.damageTakenThisTurn = 0;
     }
   }
 }
@@ -1577,7 +1585,7 @@ class Engine {
         : eff.destination === "actor_lane" ? frame.actorLane
         : eff.destination === "auto_flee" ? ((frame.targets && frame.targets.destination) || this.pickFleeLane(found.lane))
         : eff.destination;
-      if (!destLane || destLane === found.lane) continue;
+      if (!destLane || (eff.target === "self" && destLane === found.lane)) continue;
       const destArr = this.state.players[found.seat][laneKey(destLane)];
       if (destArr.length >= LANE_CAP) { this.emit("move_blocked", { instanceId: unit.instanceId, reason: "lane_full" }); continue; }
 
@@ -1954,7 +1962,14 @@ class Engine {
       this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
 
     } else if (pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") {
-      this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
+      if (pd.scope === "both_players") {
+        // Wheelie-style: fire only the self_turn_start side immediately, then
+        // the borrowed_passive_trigger will handle both sides on future turns
+        // via the patched fireBorrowedTrigger → resolveWheelieLikePassive path.
+        this.resolveWheelieLikePassive(crumbs, frame.actorSeat, frame.actorLane, sourceDef, { seat: frame.actorSeat });
+      } else {
+        this.runPassiveEffects(crumbs, frame.actorSeat, frame.actorLane, sourceDef, {});
+      }
       addStatus(crumbs, {
         kind: "borrowed_passive_trigger",
         meta: { passiveData: pd, sourceName: found.unit.name },
@@ -1978,8 +1993,19 @@ class Engine {
     for (const s of unit.statuses.filter(function(st) { return st.kind === "borrowed_passive_trigger"; })) {
       const pd = s.meta.passiveData;
       if (pd.trigger !== trigger) continue;
-      // on_turn_start and on_turn_start_self_cost only fire on the unit's OWN seat's turn
-      if ((pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") && ctx && ctx.seat && ctx.seat !== seat) continue;
+      // on_turn_start and on_turn_start_self_cost only fire on the unit's OWN seat's turn,
+      // UNLESS the passive has scope:"both_players" (Wheelie-style) — in that case it fires
+      // on both turns (self for gain, opp for drain) via resolveWheelieLikePassive.
+      if ((pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") && ctx && ctx.seat) {
+        if (pd.scope === "both_players") {
+          // Route through the Wheelie resolver so self_turn_start / opp_turn_start
+          // when-guards are respected correctly on both players' turns.
+          var wFound = findUnit(this.state, unit.instanceId);
+          if (wFound) this.resolveWheelieLikePassive(unit, seat, wFound.lane, { passive: pd }, ctx);
+          continue;
+        }
+        if (ctx.seat !== seat) continue;
+      }
       // on_turn_end_zero_energy only fires for the seat whose turn is ending
       if (pd.trigger === "on_turn_end_zero_energy" && ctx && ctx.seat && ctx.seat !== seat) continue;
 
