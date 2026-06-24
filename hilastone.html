@@ -636,6 +636,37 @@
   input[type=range].audio-slider {
     width: 100%; height: 4px; accent-color: var(--accent); cursor: pointer;
   }
+
+  /* ── Attack animations ───────────────────────────────────────────────── */
+  /* Windup: squish back from the attack direction, then spring forward.    */
+  /* The CSS variable --lunge-x / --lunge-y are set inline per-element      */
+  /* before the class is added, so each card lunges toward its target lane. */
+
+  @keyframes ucWindupLunge {
+    0%   { transform: translate(0, 0) scale(1); }
+    22%  { transform: translate(calc(var(--lunge-x, 0px) * -0.18), calc(var(--lunge-y, 0px) * -0.18)) scale(1.07); }
+    55%  { transform: translate(calc(var(--lunge-x, 0px) * 1.0),  calc(var(--lunge-y, 0px) * 1.0))  scale(0.93); }
+    75%  { transform: translate(calc(var(--lunge-x, 0px) * 0.4),  calc(var(--lunge-y, 0px) * 0.4))  scale(0.98); }
+    100% { transform: translate(0, 0) scale(1); }
+  }
+  .uc-attacking {
+    animation: ucWindupLunge 0.42s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+    z-index: 10; position: relative;
+  }
+
+  /* Hit-shake: quick left-right rattle when a card takes damage */
+  @keyframes ucHitShake {
+    0%   { transform: translate(0, 0); }
+    15%  { transform: translate(-5px, 1px) rotate(-2deg); }
+    30%  { transform: translate(5px, -1px) rotate(2deg); }
+    50%  { transform: translate(-4px, 0px) rotate(-1.5deg); }
+    70%  { transform: translate(3px, 0px) rotate(1deg); }
+    85%  { transform: translate(-2px, 0px); }
+    100% { transform: translate(0, 0) rotate(0deg); }
+  }
+  .uc-hit {
+    animation: ucHitShake 0.32s ease-out forwards;
+  }
 </style>
 </head>
 <body>
@@ -1245,6 +1276,8 @@ async function loadGame(silent) {
         }
         // Play SFX for opponent's events that arrived via poll
         playSfxForEvents(newEvents);
+        // Animate opponent's attacks arriving via poll
+        playAttackAnimations(newEvents);
       }
       lastSeenLogLength = game.log.length;
     } else {
@@ -1906,6 +1939,95 @@ function showRngToast(text) {
   rngToastTimer = setTimeout(() => { rngToast = null; render(); }, 6000);
 }
 
+// ── Combat animation driver ──────────────────────────────────────────────────
+// Called after render() with the batch of events from one engine call.
+// Finds attacker/victim DOM nodes by data-unit attribute and adds CSS classes
+// that play the windup→lunge and hit-shake keyframe animations.
+//
+// Layout constants — must match the board CSS:
+//   Seat 1 cards are in the bottom half of the board (attack upward → negative Y)
+//   Seat 2 cards are in the top half (attack downward → positive Y)
+const LANE_ORDER = { Left: 0, Center: 1, Right: 2 };
+const LUNGE_DIST_Y = 38;  // px — vertical travel toward the opponent
+const LUNGE_DIST_X = 28;  // px — horizontal offset per lane step
+
+function playAttackAnimations(events) {
+  // Collect the first "action" event that actually corresponds to a damaging
+  // move (ignore pure movement, buff, etc.) and all "damage" events.
+  const actionEv = events.find(ev => ev.type === "action");
+  const damageEvs = events.filter(ev => ev.type === "damage");
+  if (!actionEv && damageEvs.length === 0) return;
+
+  // Resolve attacker lane from the action event
+  let attackerInstanceId = actionEv ? actionEv.instanceId : null;
+  let attackerSeat = actionEv ? String(actionEv.seat) : null;
+
+  // Determine attacker's current lane from the game state
+  function laneOf(instanceId) {
+    if (!instanceId) return null;
+    const found = findUnit(game, instanceId);
+    return found ? found.lane : null;
+  }
+
+  const attackerLane = laneOf(attackerInstanceId);
+
+  // For each damage event, figure out where the target is and animate both
+  // the attacker (if it exists) and the victim.
+  requestAnimationFrame(() => {
+    // Build a set of victim instanceIds with their lanes
+    const victims = damageEvs.map(ev => ({
+      instanceId: ev.instanceId,
+      lane: laneOf(ev.instanceId),
+      seat: (() => { const f = findUnit(game, ev.instanceId); return f ? String(f.seat) : null; })(),
+    })).filter(v => v.lane);
+
+    // Determine the "attack direction" for the attacker card:
+    //   - If multiple victims across all lanes → target Center (all-lane attack like Ninaki)
+    //   - Otherwise → target the victim's lane
+    const uniqueVictimLanes = [...new Set(victims.map(v => v.lane))];
+    const targetLane = uniqueVictimLanes.length > 1 ? "Center" : (uniqueVictimLanes[0] || attackerLane || "Center");
+
+    // Compute pixel offset for the lunge
+    if (attackerInstanceId && attackerLane && attackerSeat) {
+      const el = document.querySelector(`[data-unit="${attackerSeat}|${attackerLane}|${attackerInstanceId}"]`);
+      if (el) {
+        // Y direction: seat 1 attacks upward (-Y), seat 2 attacks downward (+Y)
+        const yDir = attackerSeat === "1" ? -1 : 1;
+        const lungeY = LUNGE_DIST_Y * yDir;
+
+        // X direction: attacker lane vs target lane column difference
+        const attackerCol = LANE_ORDER[attackerLane] ?? 1;
+        const targetCol   = LANE_ORDER[targetLane]   ?? 1;
+        const lungeX = (targetCol - attackerCol) * LUNGE_DIST_X;
+
+        el.style.setProperty("--lunge-x", lungeX + "px");
+        el.style.setProperty("--lunge-y", lungeY + "px");
+
+        // Remove and re-add class to restart animation if already playing
+        el.classList.remove("uc-attacking");
+        // Force reflow
+        void el.offsetWidth;
+        el.classList.add("uc-attacking");
+        el.addEventListener("animationend", () => el.classList.remove("uc-attacking"), { once: true });
+      }
+    }
+
+    // Slight delay so the hit lands mid-lunge (matches the 55% keyframe ≈ 0.23s in)
+    const hitDelay = attackerInstanceId ? 200 : 0;
+    setTimeout(() => {
+      for (const v of victims) {
+        const sel = `[data-unit="${v.seat}|${v.lane}|${v.instanceId}"]`;
+        const vEl = document.querySelector(sel);
+        if (!vEl) continue;
+        vEl.classList.remove("uc-hit");
+        void vEl.offsetWidth;
+        vEl.classList.add("uc-hit");
+        vEl.addEventListener("animationend", () => vEl.classList.remove("uc-hit"), { once: true });
+      }
+    }, hitDelay);
+  });
+}
+
 function engineAction(fn) {
   // Shared try/catch wrapper: runs `fn`, surfaces engine errors as the
   // existing errorMsg banner, and only schedules a save if the action
@@ -1964,6 +2086,7 @@ function engineAction(fn) {
     lastSeenLogLength = game.log.length;
     scheduleSave();
     render(); // repaint immediately so modal/state changes are visible right away
+    playAttackAnimations(newEvents); // windup/lunge attacker, shake victims
     return true;
   } catch (e) {
     errorMsg = e.message || "That action couldn't be completed.";
