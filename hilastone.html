@@ -1943,82 +1943,72 @@ function showRngToast(text) {
 // Called after render() with the batch of events from one engine call.
 // Finds attacker/victim DOM nodes by data-unit attribute and adds CSS classes
 // that play the windup→lunge and hit-shake keyframe animations.
-//
-// Layout constants — must match the board CSS:
-//   Seat 1 cards are in the bottom half of the board (attack upward → negative Y)
-//   Seat 2 cards are in the top half (attack downward → positive Y)
-const LANE_ORDER = { Left: 0, Center: 1, Right: 2 };
-const LUNGE_DIST_Y = 38;  // px — vertical travel toward the opponent
-const LUNGE_DIST_X = 28;  // px — horizontal offset per lane step
+// Uses getBoundingClientRect() to compute the exact pixel vector from
+// attacker center → target center, so the lunge always points at the right card.
 
 function playAttackAnimations(events) {
-  // Collect the first "action" event that actually corresponds to a damaging
-  // move (ignore pure movement, buff, etc.) and all "damage" events.
-  const actionEv = events.find(ev => ev.type === "action");
+  const actionEv  = events.find(ev => ev.type === "action");
   const damageEvs = events.filter(ev => ev.type === "damage");
   if (!actionEv && damageEvs.length === 0) return;
 
-  // Resolve attacker lane from the action event
-  let attackerInstanceId = actionEv ? actionEv.instanceId : null;
-  let attackerSeat = actionEv ? String(actionEv.seat) : null;
+  const attackerInstanceId = actionEv ? actionEv.instanceId : null;
+  const attackerSeat       = actionEv ? String(actionEv.seat) : null;
 
-  // Determine attacker's current lane from the game state
-  function laneOf(instanceId) {
+  function unitEl(instanceId) {
     if (!instanceId) return null;
-    const found = findUnit(game, instanceId);
-    return found ? found.lane : null;
+    const f = findUnit(game, instanceId);
+    if (!f) return null;
+    return document.querySelector(`[data-unit="${f.seat}|${f.lane}|${instanceId}"]`);
   }
 
-  const attackerLane = laneOf(attackerInstanceId);
+  function center(el) {
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
 
-  // For each damage event, figure out where the target is and animate both
-  // the attacker (if it exists) and the victim.
   requestAnimationFrame(() => {
-    // Build a set of victim instanceIds with their lanes
-    const victims = damageEvs.map(ev => ({
-      instanceId: ev.instanceId,
-      lane: laneOf(ev.instanceId),
-      seat: (() => { const f = findUnit(game, ev.instanceId); return f ? String(f.seat) : null; })(),
-    })).filter(v => v.lane);
+    const attackerEl = unitEl(attackerInstanceId);
 
-    // Determine the "attack direction" for the attacker card:
-    //   - If multiple victims across all lanes → target Center (all-lane attack like Ninaki)
-    //   - Otherwise → target the victim's lane
-    const uniqueVictimLanes = [...new Set(victims.map(v => v.lane))];
-    const targetLane = uniqueVictimLanes.length > 1 ? "Center" : (uniqueVictimLanes[0] || attackerLane || "Center");
+    // Collect victim elements (filter out self-damage — attacker same as victim)
+    const victimEls = damageEvs
+      .filter(ev => ev.instanceId !== attackerInstanceId)
+      .map(ev => unitEl(ev.instanceId))
+      .filter(Boolean);
 
-    // Compute pixel offset for the lunge
-    if (attackerInstanceId && attackerLane && attackerSeat) {
-      const el = document.querySelector(`[data-unit="${attackerSeat}|${attackerLane}|${attackerInstanceId}"]`);
-      if (el) {
-        // Y direction: seat 1 attacks upward (-Y), seat 2 attacks downward (+Y)
-        const yDir = attackerSeat === "1" ? -1 : 1;
-        const lungeY = LUNGE_DIST_Y * yDir;
-
-        // X direction: attacker lane vs target lane column difference
-        const attackerCol = LANE_ORDER[attackerLane] ?? 1;
-        const targetCol   = LANE_ORDER[targetLane]   ?? 1;
-        const lungeX = (targetCol - attackerCol) * LUNGE_DIST_X;
-
-        el.style.setProperty("--lunge-x", lungeX + "px");
-        el.style.setProperty("--lunge-y", lungeY + "px");
-
-        // Remove and re-add class to restart animation if already playing
-        el.classList.remove("uc-attacking");
-        // Force reflow
-        void el.offsetWidth;
-        el.classList.add("uc-attacking");
-        el.addEventListener("animationend", () => el.classList.remove("uc-attacking"), { once: true });
-      }
+    // For all-lane attacks (multiple distinct victim elements), aim at the
+    // centroid of all victims (naturally lands on Center for symmetrical attacks).
+    let targetX = null, targetY = null;
+    if (victimEls.length > 0) {
+      let sumX = 0, sumY = 0;
+      for (const v of victimEls) { const c = center(v); sumX += c.x; sumY += c.y; }
+      targetX = sumX / victimEls.length;
+      targetY = sumY / victimEls.length;
     }
 
-    // Slight delay so the hit lands mid-lunge (matches the 55% keyframe ≈ 0.23s in)
-    const hitDelay = attackerInstanceId ? 200 : 0;
+    if (attackerEl) {
+      let lungeX = 0, lungeY = 0;
+      if (targetX !== null) {
+        const ac = center(attackerEl);
+        // Scale lunge to 55% of the full distance (card returns to origin after)
+        lungeX = (targetX - ac.x) * 0.55;
+        lungeY = (targetY - ac.y) * 0.55;
+      } else {
+        // No damage target (buff/move) — pure forward lunge toward opponent side
+        lungeY = attackerSeat === "1" ? -36 : 36;
+      }
+
+      attackerEl.style.setProperty("--lunge-x", lungeX.toFixed(1) + "px");
+      attackerEl.style.setProperty("--lunge-y", lungeY.toFixed(1) + "px");
+      attackerEl.classList.remove("uc-attacking");
+      void attackerEl.offsetWidth; // force reflow to restart animation
+      attackerEl.classList.add("uc-attacking");
+      attackerEl.addEventListener("animationend", () => attackerEl.classList.remove("uc-attacking"), { once: true });
+    }
+
+    // Hit-shake fires at 55% of lunge duration (≈200ms) so impact coincides
+    const hitDelay = attackerEl ? 200 : 0;
     setTimeout(() => {
-      for (const v of victims) {
-        const sel = `[data-unit="${v.seat}|${v.lane}|${v.instanceId}"]`;
-        const vEl = document.querySelector(sel);
-        if (!vEl) continue;
+      for (const vEl of victimEls) {
         vEl.classList.remove("uc-hit");
         void vEl.offsetWidth;
         vEl.classList.add("uc-hit");
