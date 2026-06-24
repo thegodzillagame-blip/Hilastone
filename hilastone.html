@@ -1232,6 +1232,7 @@ async function loadGame(silent) {
       if (game.currentTurn === undefined) game.currentTurn = "1";
       if (game.turnNumber === undefined) game.turnNumber = 1;
       if (game.forfeitedBy === undefined) game.forfeitedBy = null;
+      if (game.pendingPassiveSummon === undefined) game.pendingPassiveSummon = null;
       if (!game.log) game.log = [];
       if (!game.clockMs) game.clockMs = { "1": TURN_CLOCK_MS, "2": TURN_CLOCK_MS };
       if (game.clockRunning === undefined) game.clockRunning = false;
@@ -1267,7 +1268,16 @@ async function loadGame(silent) {
         for (const ps of pendingSummonsPolled) {
           if (String(mySeat) === String(ps.seat) && !passiveSummonState) {
             passiveSummonState = { seat: ps.seat, cardName: ps.cardName, actorLane: ps.actorLane };
+            // Ensure shared flag is set (opponent may have already written it, but be safe)
+            game.pendingPassiveSummon = { seat: ps.seat, actorLane: ps.actorLane };
+            scheduleSave();
           }
+        }
+        // Also restore passiveSummonState from shared flag if we missed the event
+        // (e.g. page reload mid-pending) but the flag is still active in Firestore
+        if (!passiveSummonState && game.pendingPassiveSummon && String(mySeat) === String(game.pendingPassiveSummon.seat)) {
+          const pps = game.pendingPassiveSummon;
+          passiveSummonState = { seat: String(pps.seat), cardName: "Postman Mortem", actorLane: pps.actorLane };
         }
         const pendingDisablesPolled = newEvents.filter(ev => ev.type === "passive_disable_pending");
         for (const pd of pendingDisablesPolled) {
@@ -2081,6 +2091,9 @@ function engineAction(fn) {
     for (const ps of pendingSummons) {
       if (String(mySeat) === String(ps.seat)) {
         passiveSummonState = { seat: ps.seat, cardName: ps.cardName, actorLane: ps.actorLane };
+        // Write to shared state so the opponent knows to wait
+        game.pendingPassiveSummon = { seat: ps.seat, actorLane: ps.actorLane };
+        scheduleSave();
       }
     }
     // passive_disable_pending: Yukiko (on_move_self disable a chosen enemy)
@@ -2108,6 +2121,8 @@ function engineAction(fn) {
 
 function summonFromHand(seat, name, lane, opts) {
   if (!isMine(seat)) return;
+  // Block while the other player is resolving their Postman Mortem passive
+  if (game.pendingPassiveSummon && String(game.pendingPassiveSummon.seat) !== String(seat)) return;
   if (!isAutoResolvable(name)) {
     errorMsg = name + " doesn't have automatic resolution data yet (DLC card) — summon manually isn't supported in this version.";
     render();
@@ -2211,7 +2226,18 @@ function submitPassiveSummon(cardName, lane) {
   if (!passiveSummonState) return;
   const { seat } = passiveSummonState;
   passiveSummonState = null;
+  _psChosenCard = null;
+  game.pendingPassiveSummon = null; // unblock the opponent
   engineAction(eng => eng.resolvePassiveSummon(seat, cardName, lane));
+}
+
+function skipPassiveSummon() {
+  if (!passiveSummonState) return;
+  passiveSummonState = null;
+  _psChosenCard = null;
+  game.pendingPassiveSummon = null; // unblock the opponent
+  scheduleSave();
+  render();
 }
 
 // Called when the player picks an enemy to disable for Yukiko's on_move_self passive.
@@ -2300,6 +2326,8 @@ function setEnergy(seat, value) {
 
 function endTurn(seat) {
   if (!isMine(seat)) return;
+  // Block actions while the other player is resolving their Postman Mortem passive
+  if (game.pendingPassiveSummon && String(game.pendingPassiveSummon.seat) !== String(seat)) return;
   playSfx("turn");
   if (game.currentTurn !== seat) return;
   if (game.clockRunning && game.lastTickAt) {
@@ -2505,6 +2533,8 @@ function computeActionNeeds(actorSeat, actorLane, action) {
 
 function beginAction(seat, instanceId, actionIndex) {
   if (!isMine(seat)) return;
+  // Block while the other player is resolving their Postman Mortem passive
+  if (game.pendingPassiveSummon && String(game.pendingPassiveSummon.seat) !== String(seat)) return;
   const found = findUnit(game, instanceId);
   if (!found) return;
   const def = cardDef(found.unit.name);
@@ -3027,6 +3057,20 @@ function renderBoard() {
               return `<button class="primary" style="flex:1;opacity:0.4" id="psLane_${l}" disabled onclick="psPickLane('${l}')">${l}${carmellaBlocked ? " (blocked)" : ""}</button>`;
             }).join("")}
           </div>
+          <button class="ghost" style="width:100%;margin-top:10px;opacity:0.6;font-size:12px" onclick="skipPassiveSummon()">Skip — don't summon</button>
+        </div>`;
+    } else if (game.pendingPassiveSummon && String(mySeat) !== String(game.pendingPassiveSummon.seat)) {
+      // Opponent is deciding — show a blocking "please wait" overlay
+      if (!psOverlay) {
+        psOverlay = document.createElement("div");
+        psOverlay.id = "passiveSummonOverlay";
+        psOverlay.className = "win-overlay";
+        document.body.appendChild(psOverlay);
+      }
+      psOverlay.innerHTML = `
+        <div class="win-card" style="max-width:360px;text-align:center">
+          <div class="win-title" style="font-size:18px;color:var(--accent)">⏳ Waiting…</div>
+          <div class="win-reason" style="margin-top:8px">Player ${game.pendingPassiveSummon.seat} is choosing whether to summon a card from Postman Mortem's passive.</div>
         </div>`;
     } else if (psOverlay) {
       psOverlay.remove();
