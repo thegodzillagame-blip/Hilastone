@@ -757,6 +757,7 @@ class Engine {
       movementLocked: false,
       cannotBeMoved: false,         // Rannivieve: "Bolted Down" — immune to ALL move sources, even self
       cannotBeStoppedFromMoving: false, // Halcyon: immune to disable/lock on movement specifically
+      cannotBeDisabled: false,      // Leon: immune to disable_actions in any form
       summonBlockedInLane: false,   // Carmella
       boostMultiplier: 1,           // Andromeda: doubles damage/HP-boost ops cast by allies in her lane
       disabledByLaneController: false, // Ellie Ember: only she can act in her lane
@@ -865,6 +866,10 @@ class Engine {
         break;
       case "cannot_be_stopped_from_moving":
         bag.cannotBeStoppedFromMoving = true;
+        break;
+      case "immune_to_disable":
+        // Leon: can never receive disable_actions status
+        bag.cannotBeDisabled = true;
         break;
       case "damage_taken_cap_per_hit":
         bag.damageTakenCapPerHit = bag.damageTakenCapPerHit === null ? eff.amount : Math.min(bag.damageTakenCapPerHit, eff.amount);
@@ -1281,6 +1286,10 @@ class Engine {
 
     if (!isSelfDamage && hasStatus(unit, "halve_damage")) {
       amount = Math.ceil(amount / 2);
+      // Consume any "next_attack" halve_damage statuses (Leon a2: one-shot)
+      unit.statuses = unit.statuses.filter(function(s) {
+        return !(s.kind === "halve_damage" && s.expires && s.expires.type === "next_attack");
+      });
     }
 
     if (amount < 0) amount = 0;
@@ -1306,6 +1315,10 @@ class Engine {
       instanceId: unit.instanceId, amount: amount, before: before, after: unit.hp,
       sourceInstanceId: attackerUnit ? attackerUnit.instanceId : null, multiTarget: multiTarget,
     });
+
+    // Leon a3: retaliatory_watch — if an ally of the damaged unit takes damage
+    // on the opponent's turn, retaliate against all enemies on the board.
+    if (!isSelfDamage) this.maybeLeonRetaliate(unit);
 
     if (!isSelfDamage && attackerUnit && unit.hp >= 0) {
       this.maybeReflect(unit, attackerUnit, amount, multiTarget);
@@ -1435,6 +1448,36 @@ class Engine {
       if (eff.op === "reflect_damage") {
         const reflectAmt = Math.ceil(amountDealt * eff.fraction);
         this.applyDamage(attacker, reflectAmt, null, null, { multiTarget: false, isSelfDamage: false });
+      }
+    }
+  }
+
+  // Leon a3: "On your opponent's next turn, if one of Leon's allies takes
+  // damage, all opposing lanes take 2 damage." Fires once (first ally hit),
+  // then removes the retaliatory_watch status so it doesn't fire again.
+  maybeLeonRetaliate(damagedUnit) {
+    const damagedFound = findUnit(this.state, damagedUnit.instanceId);
+    if (!damagedFound) return;
+    const damagedSeat = damagedFound.seat;
+    const oppSeat = this.opponentOf(damagedSeat);
+    // Scan damagedSeat's units for a Leon with retaliatory_watch
+    for (const lane of LANES) {
+      for (const u of this.state.players[damagedSeat][laneKey(lane)]) {
+        if (u.name !== "Leon") continue;
+        if (u.instanceId === damagedUnit.instanceId) continue; // Leon himself doesn't count as ally
+        const watchIdx = u.statuses.findIndex(function(s) { return s.kind === "retaliatory_watch"; });
+        if (watchIdx < 0) continue;
+        const watchAmt = (u.statuses[watchIdx].meta && u.statuses[watchIdx].meta.amount) || 2;
+        // Consume the watch immediately so only the first ally hit triggers it
+        u.statuses.splice(watchIdx, 1);
+        // Deal watchAmt damage to every enemy unit on the board
+        for (const oppLane of LANES) {
+          const targets = this.state.players[oppSeat][laneKey(oppLane)].slice();
+          for (const enemy of targets) {
+            this.applyDamage(enemy, watchAmt, u, null, { multiTarget: true, isSelfDamage: false });
+          }
+        }
+        return; // only one Leon can have the watch active at a time
       }
     }
   }
@@ -1721,6 +1764,8 @@ class Engine {
   op_disable_actions(eff, frame) {
     const units = this.resolveTargetUnits(eff.target, frame, eff);
     for (const unit of units) {
+      // Leon's passive: immune to disable in any form
+      if (this.getContinuousState(unit).cannotBeDisabled) continue;
       // "until_their_next_turn" (Kazura a3: "disable their actions for one
       // turn") must expire on the DISABLED UNIT's own next turn, not the
       // caster's — look up the target's actual seat rather than defaulting
@@ -2332,6 +2377,20 @@ class Engine {
   op_ban_opponent_summon_in_lane(eff, frame) { /* handled by applyOnPlaceLaneBans */ }
   op_cannot_be_moved(eff, frame) { /* handled inline in op_move via getContinuousState */ }
   op_cannot_be_stopped_from_moving(eff, frame) { /* handled inline in op_move via getContinuousState */ }
+  op_immune_to_disable(eff, frame) { /* handled inline in op_disable_actions via getContinuousState */ }
+  op_retaliatory_watch(eff, frame) {
+    // Leon a3: sets a "retaliatory_watch" status on Leon. When any ally (not Leon)
+    // takes damage on the opponent's next turn, deal 2 damage to all enemies on
+    // the board and consume the watch. Applied as a status so it persists through
+    // the turn boundary correctly.
+    addStatus(frame.actorUnit, {
+      kind: "retaliatory_watch",
+      meta: { amount: eff.amount || 2 },
+      expires: { type: "until_next_turn", ownerSeatAtApply: this.opponentOf(frame.actorSeat) },
+      // expires at the END of the opponent's next turn (so it covers the full turn)
+    });
+    this.emit("status_applied", { instanceId: frame.actorUnit.instanceId, kind: "retaliatory_watch" });
+  }
   op_boost_allies_in_lane(eff, frame) { /* handled inline in op_buff_damage/op_heal via getLaneBoostMultiplier */ }
   op_free_summon_per_turn(eff, frame) { /* handled by findActiveUnitGrantingFreeSummon + summon() opt-in */ }
   op_defeat_requires_exact_zero(eff, frame) { /* handled inline in defeatUnit (Lucia) */ }
