@@ -2640,6 +2640,13 @@ function provideCopyActionIndex(idx) {
         // Re-map need kinds so collected values land in copiedTargets.*.
         const remapped = copiedNeeds.map(n => Object.assign({}, n, { forCopiedAction: true }));
         actionTargetState.needs = actionTargetState.needs.slice(0, actionTargetState.needIndex).concat(remapped);
+        // advanceTargetCollection() unconditionally does needIndex++ before
+        // testing it against actionTargetState.needs — since the needs array
+        // was just rebuilt to start fresh at this same needIndex, that
+        // increment would skip its first entry. Cancel it out here so the
+        // copied action's own needs (e.g. its single-target pick) actually
+        // get presented to the player instead of resolving with no target.
+        actionTargetState.needIndex -= 1;
       }
     }
   }

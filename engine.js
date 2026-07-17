@@ -115,6 +115,24 @@ function addStatus(unit, status) {
   unit.statuses.push(status);
 }
 
+// Margerine: "Whenever an ally within the lane attacks..." — recursively
+// scans an action's effect list for anything that actually deals damage to
+// someone other than the actor, so purely defensive/self actions (moves,
+// self-heals) don't count as "attacking."
+function actionEffectsContainAttack(effects) {
+  for (const e of effects || []) {
+    if (e.op === "damage" && e.target !== "self") return true;
+    if (e.op === "damage_equal_to_self_hp") return true;
+    if (actionEffectsContainAttack(e.effects)) return true;
+    if (actionEffectsContainAttack(e.then)) return true;
+    if (actionEffectsContainAttack(e.else)) return true;
+    if (actionEffectsContainAttack(e.onHeads)) return true;
+    if (actionEffectsContainAttack(e.onTails)) return true;
+    if (e.onResult && actionEffectsContainAttack([e.onResult])) return true;
+  }
+  return false;
+}
+
 function removeStatusesById(unit, ids) {
   unit.statuses = unit.statuses.filter(function (s) { return ids.indexOf(s.id) === -1; });
 }
@@ -127,12 +145,20 @@ function removeStatusesById(unit, ids) {
 // these are personal to the unit's own turn cadence (matches "once per turn"
 // reading on cards like Ridley/Cinwicke/Cordelia/Kazura/Reishi).
 function expireStatusesOnTurnStart(state, seat) {
+  // Fionelle's "Chains of Infinity" needs to know whenever a unit's bonus
+  // Health total (sum of temp_heal_rollback amounts) drops from >0 to 0 —
+  // the natural turn-start rollback below is the most common way that
+  // happens, so we track it here and hand the list back to the caller
+  // (which has the Engine instance needed to react to it).
+  const zeroedBonusHpUnitIds = [];
   // until_next_turn and this_turn statuses can be applied to ANY unit (including
   // enemy units — e.g. Venus a3 disables all enemies in lane until Venus's next
   // turn). We must scan ALL units across both seats to correctly clear them.
   for (const scanSeat of ["1", "2"]) {
     for (const lane of LANES) {
       for (const u of state.players[scanSeat][laneKey(lane)]) {
+        const bonusHpBefore = u.statuses.filter(function (s) { return s.kind === "temp_heal_rollback"; })
+          .reduce(function (sum, s) { return sum + (s.amount || 0); }, 0);
         // Roll back temporary HP before stripping the status — temp_heal_rollback
         // tracks exactly how much bonus HP was granted so we can remove it precisely.
         for (const s of u.statuses) {
@@ -147,6 +173,9 @@ function expireStatusesOnTurnStart(state, seat) {
           if (s.expires && s.expires.type === "this_turn" && s.expires.ownerSeatAtApply === seat) return false;
           return true;
         });
+        const bonusHpAfter = u.statuses.filter(function (s) { return s.kind === "temp_heal_rollback"; })
+          .reduce(function (sum, s) { return sum + (s.amount || 0); }, 0);
+        if (bonusHpBefore > 0 && bonusHpAfter === 0) zeroedBonusHpUnitIds.push(u.instanceId);
         // Only reset counters and damageTakenThisTurn for the seat whose turn is starting
         if (scanSeat === seat) {
           u.counters = {};
@@ -155,6 +184,7 @@ function expireStatusesOnTurnStart(state, seat) {
       }
     }
   }
+  return zeroedBonusHpUnitIds;
 }
 
 // Clears statuses that should last through the turn but expire at its end —
@@ -230,6 +260,20 @@ class Engine {
 
   opponentOf(seat) { return seat === "1" ? "2" : "1"; }
 
+  // Ninaki: "Occupies all 4 slots in the lane" — true if any unit currently
+  // in seat's board for `lane` carries occupies_all_slots, meaning that
+  // lane is effectively full to everyone else regardless of LANE_CAP.
+  isLaneOccupiedExclusively(seat, lane) {
+    const units = this.state.players[seat][laneKey(lane)];
+    for (const u of units) {
+      const def = this.cardDef(u.name);
+      if (def.passive && def.passive.effects && def.passive.effects.some(function (e) { return e.op === "occupies_all_slots"; })) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // -- summon / turn flow --------------------------------------------------
 
   summon(seat, cardName, lane, opts) {
@@ -240,6 +284,14 @@ class Engine {
     if (idx < 0) throw new Error(cardName + " not in hand");
     const def = this.cardDef(cardName);
     const lk = laneKey(lane);
+    // Ninaki: "Occupies all 4 slots in the lane" — she can't be summoned
+    // into a lane that already has anyone else in it (she needs the whole
+    // lane to herself), and once she's there, nobody else can be summoned
+    // in alongside her (the lane reads as full even below LANE_CAP).
+    if (this.isLaneOccupiedExclusively(seat, lane)) throw new Error("Lane full");
+    if (def.passive && def.passive.effects && def.passive.effects.some(function (e) { return e.op === "occupies_all_slots"; }) && p[lk].length > 0) {
+      throw new Error("Lane full");
+    }
     if (p[lk].length >= LANE_CAP) throw new Error("Lane full");
 
     // Carmella: "No characters can be summoned to the same lane as this
@@ -424,7 +476,8 @@ class Engine {
       this.state.players[seat]._carryoverEnergy = 0;
     }
     this.emit("energy_change", { seat: seat, amount: BASE_ENERGY + carryover, newTotal: this.state.players[seat].energy, reason: "turn_reset" });
-    expireStatusesOnTurnStart(this.state, seat);
+    const zeroedBonusHp = expireStatusesOnTurnStart(this.state, seat);
+    this.applyChainsOfInfinity(zeroedBonusHp);
 
     // Linnaeus: if he's in hand but Piper is gone (not in hand, not on board),
     // he's auto-defeated — card text: "Considered defeated if Piper is unusable."
@@ -650,6 +703,14 @@ class Engine {
     const sharedFrame = { actorUnit: unit, actorSeat: seat, actorLane: lane, targets: targets, isPassive: false, spentCost: cost };
     for (const eff of action.effects) {
       this.runOp(eff, sharedFrame);
+    }
+
+    // Margerine: "Whenever an ally within the lane attacks, this character
+    // deals 2 Damage to a single target." Fired after the attacking ally's
+    // own effects resolve, using the ally's CURRENT lane (sharedFrame.actorLane
+    // may have changed if the action itself included a move, e.g. Syrah a3).
+    if (actionIndex !== "passive" && actionEffectsContainAttack(action.effects)) {
+      this.fireAllyAttackInLane(seat, sharedFrame.actorLane, unit);
     }
 
     return this.events;
@@ -933,6 +994,17 @@ class Engine {
             const count2 = this.state.players["1"][laneKey(found2.lane)].length + this.state.players["2"][laneKey(found2.lane)].length;
             bag.damageDealtBonus += (eff.amountPer || 0) * count2;
           }
+        }
+        break;
+      case "adaptation_mirror":
+        // Jubi: folds her accumulated Adaptation bonus-Damage pool (built up
+        // by maybeJubiAdaptation, swappable via op_swap_bonus_damage_hp) into
+        // her actual combat damage, the same way every other continuous
+        // damage-bonus source works. Her bonus HP side is applied directly
+        // to unit.hp at mirror-time instead (see maybeJubiAdaptation), so it
+        // needs no continuous read here.
+        if (ctx.isSelf) {
+          bag.damageDealtBonus += ctx.targetUnit.counters.jubiBonusDamage || 0;
         }
         break;
       case "buff_damage":
@@ -1387,7 +1459,7 @@ class Engine {
     if (!attackerDef.passive || attackerDef.passive.trigger !== "on_single_target_attack_hit") return;
     const defenderFoundBefore = findUnit(this.state, defenderUnit.instanceId);
     if (!attackerFound || !defenderFoundBefore) return;
-    const destLane = this.pickFleeLane(defenderFoundBefore.lane);
+    const destLane = this.pickFleeLane(defenderFoundBefore.lane, defenderFoundBefore.seat);
     this.runOp(
       { op: "move", target: "single_any", destination: destLane },
       { actorUnit: attackerUnit, actorSeat: attackerFound.seat, actorLane: attackerFound.lane, targets: { singleTarget: defenderUnit.instanceId } }
@@ -1584,10 +1656,12 @@ class Engine {
         // Only trigger on single-target attacks (Hyperion's "Single-target damage"
         // wording; a multi-target hit like Aegon a3 should not proc this).
         if (!multiTarget) {
-          addStatus(defender, {
+          const _st1 = {
             kind: "buff_damage", amount: eff.amount || 0, multiplier: eff.multiplier,
             expires: { type: "next_attack" },
-          });
+          };
+          addStatus(defender, _st1);
+          this.maybeJubiAdaptation(defender, _st1);
         }
       } else {
         // Generic fallthrough: any other on_attacked op (e.g. Nurse Anna's
@@ -1603,8 +1677,24 @@ class Engine {
   // Picks a lane different from `currentLane` for "move to a different lane"
   // effects that don't have an explicit UI-supplied destination (used by
   // reactive passives that move a unit as a side effect, not a player choice).
-  // Prototype simplification: picks the first non-current lane with room.
-  pickFleeLane(currentLane) {
+  // Picks the first non-current lane that still has room on `seat`'s board.
+  // BUGFIX: this previously ignored capacity entirely (despite its own
+  // docstring claiming otherwise), always returning the first non-current
+  // lane in LANES regardless of whether it was full. On a populated board
+  // that first candidate lane is very often full, so op_move would silently
+  // block the move (emitting move_blocked) — which for Remington's Maraud
+  // passive (and Miles's on-defeat revive-move, and Mirette's auto_flee)
+  // meant the passive just quietly did nothing on a crowded board. If no
+  // seat is supplied (a couple of legacy call sites), or every other lane
+  // happens to be full, fall back to the old "first non-current lane"
+  // behavior so op_move's own capacity check still applies as a backstop.
+  pickFleeLane(currentLane, seat) {
+    if (seat !== undefined) {
+      for (const lane of LANES) {
+        if (lane === currentLane) continue;
+        if (this.state.players[seat][laneKey(lane)].length < LANE_CAP) return lane;
+      }
+    }
     for (const lane of LANES) {
       if (lane !== currentLane) return lane;
     }
@@ -1636,10 +1726,12 @@ class Engine {
       }
       this.emit("heal", { instanceId: unit.instanceId, amount: amount, before: before, after: found.unit.hp, temporary: !!eff.temporary });
       if (eff.temporary) {
-        addStatus(found.unit, {
+        const _st2 = {
           kind: "temp_heal_rollback", amount: amount,
           expires: { type: "until_next_turn", ownerSeatAtApply: frame.actorSeat },
-        });
+        };
+        addStatus(found.unit, _st2);
+        this.maybeJubiAdaptation(found.unit, _st2);
       }
     }
   }
@@ -1666,11 +1758,11 @@ class Engine {
       let destLane = eff.destination === "choice" ? (frame.targets && frame.targets.destination)
         : eff.destination === "card_lane:Piper" ? this.findCardLane("Piper")
         : eff.destination === "actor_lane" ? frame.actorLane
-        : eff.destination === "auto_flee" ? ((frame.targets && frame.targets.destination) || this.pickFleeLane(found.lane))
+        : eff.destination === "auto_flee" ? ((frame.targets && frame.targets.destination) || this.pickFleeLane(found.lane, found.seat))
         : eff.destination;
       if (!destLane || (eff.target === "self" && destLane === found.lane)) continue;
       const destArr = this.state.players[found.seat][laneKey(destLane)];
-      if (destArr.length >= LANE_CAP) { this.emit("move_blocked", { instanceId: unit.instanceId, reason: "lane_full" }); continue; }
+      if (destArr.length >= LANE_CAP || this.isLaneOccupiedExclusively(found.seat, destLane)) { this.emit("move_blocked", { instanceId: unit.instanceId, reason: "lane_full" }); continue; }
 
       const srcArr = this.state.players[found.seat][laneKey(found.lane)];
       const fromLane = found.lane;
@@ -1760,10 +1852,12 @@ class Engine {
       if (!eff.stacks) {
         unit.statuses = unit.statuses.filter(function (s) { return s.kind !== "buff_damage"; });
       }
-      addStatus(unit, {
+      const _st3 = {
         kind: "buff_damage", amount: (eff.amount || 0) * boost, multiplier: eff.multiplier,
         expires: this.durationToExpiry(eff.duration, frame.actorSeat),
-      });
+      };
+      addStatus(unit, _st3);
+      this.maybeJubiAdaptation(unit, _st3);
       this.emit("status_applied", { instanceId: unit.instanceId, kind: "buff_damage", amount: (eff.amount || 0) * boost, multiplier: eff.multiplier });
     }
   }
@@ -1849,6 +1943,46 @@ class Engine {
       addStatus(unit, { kind: "passive_negated", expires: this.durationToExpiry(eff.duration, frame.actorSeat) });
       this.emit("status_applied", { instanceId: unit.instanceId, kind: "passive_negated" });
     }
+  }
+
+  // Fionelle a3: "Remove all bonus HP and Damage from a single target." Only
+  // strips accumulated BONUSES (temp_heal_rollback / buff_damage statuses)
+  // — never touches a unit's innate HP or actions. Rolls back whatever
+  // bonus HP had been granted (same precise-amount rollback used at
+  // turn-start), and if that bonus HP total drops from >0 to 0, that's
+  // itself a "loses all bonus Health" event — any Fionelle on the board
+  // (this one included) reacts via Chains of Infinity exactly as a natural
+  // turn-start rollback would.
+  op_remove_bonus_hp_damage(eff, frame) {
+    const units = this.resolveTargetUnits(eff.target, frame, eff);
+    const zeroed = [];
+    for (const unit of units) {
+      const bonusHpBefore = unit.statuses.filter(function (s) { return s.kind === "temp_heal_rollback"; })
+        .reduce(function (sum, s) { return sum + (s.amount || 0); }, 0);
+      if (bonusHpBefore > 0) {
+        unit.hp = Math.max(1, unit.hp - bonusHpBefore);
+        zeroed.push(unit.instanceId);
+      }
+      unit.statuses = unit.statuses.filter(function (s) { return s.kind !== "temp_heal_rollback" && s.kind !== "buff_damage"; });
+      this.emit("status_applied", { instanceId: unit.instanceId, kind: "bonus_stripped" });
+    }
+    this.applyChainsOfInfinity(zeroed);
+  }
+
+  // Jubi a3: "Swap bonus Damage and HP." Swaps her two accumulated
+  // Adaptation pools (counters.jubiBonusDamage / jubiBonusHp — see
+  // maybeJubiAdaptation) and applies the HP side of the swap immediately:
+  // removes the old bonus-HP amount from her current hp and adds the new
+  // one (the old bonus-Damage amount). Clamped to a minimum of 1 so the
+  // swap itself can never be a self-kill.
+  op_swap_bonus_damage_hp(eff, frame) {
+    const unit = frame.actorUnit;
+    const bd = unit.counters.jubiBonusDamage || 0;
+    const bh = unit.counters.jubiBonusHp || 0;
+    unit.counters.jubiBonusDamage = bh;
+    unit.counters.jubiBonusHp = bd;
+    unit.hp = Math.max(1, unit.hp - bh + bd);
+    this.emit("status_applied", { instanceId: unit.instanceId, kind: "adaptation_swap", newBonusDamage: bh, newBonusHp: bd });
   }
 
   // Tanker: toggles a `mode` flag that the action-lookup step (resolveAction)
@@ -1999,7 +2133,9 @@ class Engine {
     const count = this.state.players[oppSeat][laneKey(frame.actorLane)].length;
     if (count === 0) return;
     const gain = eff.amount * count;
-    addStatus(frame.actorUnit, { kind: "buff_damage", amount: gain, expires: { type: "permanent" } });
+    const _st4 = { kind: "buff_damage", amount: gain, expires: { type: "permanent" } };
+    addStatus(frame.actorUnit, _st4);
+    this.maybeJubiAdaptation(frame.actorUnit, _st4);
     this.emit("status_applied", { instanceId: frame.actorUnit.instanceId, kind: "buff_damage", amount: gain });
   }
 
@@ -2026,14 +2162,16 @@ class Engine {
     }
   }
 
-  // Jacie a3: "Double current HP" — heals self by current HP amount, temporary
+  // J.C. a3: "Double current HP" — heals self by current HP amount, temporary
   op_heal_double_current(eff, frame) {
     const unit = frame.actorUnit;
     const amount = unit.hp;
     if (amount <= 0) return;
     unit.hp += amount;
     this.emit("heal", { instanceId: unit.instanceId, amount: amount, before: unit.hp - amount, after: unit.hp, temporary: true });
-    addStatus(unit, { kind: "temp_heal_rollback", amount: amount, expires: { type: "until_next_turn", ownerSeatAtApply: frame.actorSeat } });
+    const _st5 = { kind: "temp_heal_rollback", amount: amount, expires: { type: "until_next_turn", ownerSeatAtApply: frame.actorSeat } };
+    addStatus(unit, _st5);
+    this.maybeJubiAdaptation(unit, _st5);
   }
 
   // Aegon a3: apply a one-shot reflect status consumed in applyDamage
@@ -2149,10 +2287,12 @@ class Engine {
             }
           } else if (eff.op === "flag_next_attack_bonus") {
             if (!multiTarget) {
-              addStatus(unit, {
+              const _st6 = {
                 kind: "buff_damage", amount: eff.amount || 0, multiplier: eff.multiplier,
                 expires: { type: "next_attack" },
-              });
+              };
+              addStatus(unit, _st6);
+              this.maybeJubiAdaptation(unit, _st6);
             }
           } else {
             this.runOp(eff, { actorUnit: unit, actorSeat: found.seat, actorLane: found.lane, targets: {} });
@@ -2238,7 +2378,7 @@ class Engine {
         // the passive fire path. Supply pickFleeLane as the automatic default
         // so Miles actually moves; a toast will tell both players where he went.
         const passiveTargets = eff.op === "move" && eff.destination === "choice"
-          ? { destination: this.pickFleeLane(lane) }
+          ? { destination: this.pickFleeLane(lane, seat) }
           : {};
         const didMove = eff.op === "move";
         const destForToast = passiveTargets.destination;
@@ -2301,6 +2441,26 @@ class Engine {
     return true;
   }
 
+  // Margerine: "Whenever an ally within the lane attacks, this character
+  // deals 2 Damage to a single target." Auto-picks the first enemy in the
+  // lane (same auto-resolve convention used elsewhere for passive-fired,
+  // no-picker-available damage, e.g. Nurse Anna a1's enemy_in_new_lane).
+  fireAllyAttackInLane(seat, lane, attackerUnit) {
+    const oppSeat = this.opponentOf(seat);
+    for (const u of this.state.players[seat][laneKey(lane)]) {
+      if (u.instanceId === attackerUnit.instanceId) continue;
+      const def = this.cardDef(u.name);
+      if (!def.passive || def.passive.trigger !== "on_ally_attack_in_lane") continue;
+      if (hasStatus(u, "passive_negated")) continue;
+      const enemies = this.state.players[oppSeat][laneKey(lane)];
+      if (enemies.length === 0) continue;
+      const targetId = enemies[0].instanceId;
+      for (const eff of def.passive.effects) {
+        this.runOp(eff, { actorUnit: u, actorSeat: seat, actorLane: lane, targets: { singleTarget: targetId }, isPassive: true });
+      }
+    }
+  }
+
   applyFreeSummonOnAnyDefeat() {
     for (const seat of ["1", "2"]) {
       const p = this.state.players[seat];
@@ -2312,6 +2472,72 @@ class Engine {
           p._freeSummonCards[cardName] = true;
         }
       }
+    }
+  }
+
+  // Fionelle's "Chains of Infinity": whenever ANY character (friend or foe)
+  // loses ALL of its bonus Health — i.e. its tracked temp_heal_rollback
+  // total drops from >0 to 0, whether via natural turn-start rollback or
+  // an explicit strip like her own a3 — every active Fionelle on the board
+  // gains 2 HP and 2 bonus Damage, once per unit that crossed that
+  // threshold. Board-wide observer, same style as applyFreeSummonOnAnyDefeat
+  // above, except this reacts to active board units rather than hand cards.
+  applyChainsOfInfinity(zeroedBonusHpUnitIds) {
+    if (!zeroedBonusHpUnitIds || zeroedBonusHpUnitIds.length === 0) return;
+    for (const seat of ["1", "2"]) {
+      for (const lane of LANES) {
+        for (const u of this.state.players[seat][laneKey(lane)]) {
+          const def = this.cardDef(u.name);
+          if (!def.passive || def.passive.trigger !== "passive_continuous") continue;
+          if (!def.passive.effects.some(function (e) { return e.op === "chains_of_infinity"; })) continue;
+          if (hasStatus(u, "passive_negated")) continue;
+          for (let i = 0; i < zeroedBonusHpUnitIds.length; i++) {
+            u.hp += 2;
+            const _st7 = { kind: "buff_damage", amount: 2, expires: { type: "permanent" } };
+            addStatus(u, _st7);
+            this.maybeJubiAdaptation(u, _st7);
+            this.emit("status_applied", { instanceId: u.instanceId, kind: "chains_of_infinity_gain" });
+          }
+        }
+      }
+    }
+  }
+
+  // Jubi's "Adaptation": whenever an OPPOSING card (from Jubi's perspective)
+  // in HER lane gains bonus HP (temp_heal_rollback) or bonus Damage
+  // (buff_damage) from ANY source — self-buff, ally buff, doesn't matter —
+  // Jubi mirrors that gain onto herself, PERMANENTLY: the mirrored copy
+  // never expires regardless of how long the original grant lasts on its
+  // owner ("stacks between turns"). Bonus HP is mirrored as an immediate,
+  // permanent heal (and tracked in counters.jubiBonusHp so a3's swap can
+  // move it later); bonus Damage is mirrored as a permanent buff_damage
+  // status and tracked in counters.jubiBonusDamage, which getContinuousState
+  // folds into damageDealtBonus via the "adaptation_mirror" op below. This
+  // is called explicitly from every call site that grants a buff_damage or
+  // temp_heal_rollback status (rather than centralized in addStatus itself,
+  // since addStatus is a bare module function with no board/seat context).
+  maybeJubiAdaptation(unit, status) {
+    if (status.kind !== "buff_damage" && status.kind !== "temp_heal_rollback") return;
+    const found = findUnit(this.state, unit.instanceId);
+    if (!found) return;
+    const jubiSeat = this.opponentOf(found.seat);
+    const jubis = this.state.players[jubiSeat][laneKey(found.lane)].filter(function (u) { return u.name === "Jubi"; });
+    if (jubis.length === 0) return;
+    const amount = status.amount || 0;
+    if (amount === 0) return;
+    for (const jubi of jubis) {
+      if (jubi.instanceId === unit.instanceId) continue;
+      if (hasStatus(jubi, "passive_negated")) continue;
+      if (status.kind === "buff_damage") {
+        jubi.counters.jubiBonusDamage = (jubi.counters.jubiBonusDamage || 0) + amount;
+      } else {
+        jubi.counters.jubiBonusHp = (jubi.counters.jubiBonusHp || 0) + amount;
+        jubi.hp += amount;
+      }
+      this.emit("status_applied", {
+        instanceId: jubi.instanceId, kind: "adaptation_mirror",
+        statusKind: status.kind, amount: amount, sourceInstanceId: unit.instanceId,
+      });
     }
   }
 
@@ -2462,6 +2688,9 @@ class Engine {
   op_free_summon_per_turn(eff, frame) { /* handled by findActiveUnitGrantingFreeSummon + summon() opt-in */ }
   op_defeat_requires_exact_zero(eff, frame) { /* handled inline in defeatUnit (Lucia) */ }
   op_bonus_damage_per_graveyard(eff, frame) { /* handled by getContinuousState/applyContinuousEffect (Jacie) */ }
+  op_chains_of_infinity(eff, frame) { /* handled by applyChainsOfInfinity, fired from expireStatusesOnTurnStart and op_remove_bonus_hp_damage (Fionelle) */ }
+  op_adaptation_mirror(eff, frame) { /* handled by maybeJubiAdaptation (mirroring) + getContinuousState/applyContinuousEffect (damage bonus) (Jubi) */ }
+  op_occupies_all_slots(eff, frame) { /* handled inline wherever lane capacity is checked before a summon (Ninaki) */ }
   op_mode_definition(eff, frame) { /* consulted via lookupAction()/op_switch_mode, not executed */ }
 
   // Generic if/else wrapper used throughout Phase 2 cards (Gunpowder a3,
