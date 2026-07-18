@@ -161,6 +161,16 @@
   .pool-card:hover { transform: translateY(-1px); border-color: var(--accent); }
   .pool-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 10px rgba(62,232,200,0.4); }
   .pool-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card-art-fallback {
+    width: 100%; height: 100%; aspect-ratio: 1;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg-tertiary);
+    color: var(--accent);
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
   .pool-card .pc-cost {
     position: absolute; top: 3px; left: 3px; background: rgba(7,10,20,0.82);
     color: var(--accent); font-size: 10px; font-weight: 800; padding: 1px 5px; border-radius: 8px;
@@ -719,6 +729,18 @@ function cardDef(name) { return CARDS.find(c => c.name === name) || CARDS.find(c
 function getCardImage(name) {
   const def = cardDef(name);
   return (def && def.image) || null;
+}
+
+// Most cards don't have portrait art (only a handful of special/DLC cards do).
+// Rather than emit `<img src="null">` (which renders as a broken-image icon and
+// collapses the layout), render a small initials placeholder in that case.
+function cardArtHtml(name, extraStyle) {
+  const img = getCardImage(name);
+  const styleAttr = extraStyle ? ` style="${extraStyle}"` : "";
+  const safeName = escapeHtml(name || "");
+  if (img) return `<img src="${img}" alt="${safeName}"${styleAttr}>`;
+  const initials = (name || "?").replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
+  return `<div class="card-art-fallback"${styleAttr}>${initials}</div>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2839,7 +2861,7 @@ function renderSetup() {
   const handStrip = document.getElementById("pickHandStrip");
   if (handStrip) {
     handStrip.innerHTML = p.pool.length === 0 ? `<div class="empty-hint">No cards selected yet</div>` : p.pool.map(n => `
-      <div class="mini-card"><img src="${getCardImage(n)}" alt="${n}"><button data-remove="${escapeHtml(n)}">×</button></div>
+      <div class="mini-card">${cardArtHtml(n)}<button data-remove="${escapeHtml(n)}">×</button></div>
     `).join("");
     document.querySelectorAll("[data-remove]").forEach(el => {
       el.onclick = (e) => { e.stopPropagation(); togglePoolPick(seat, el.dataset.remove); };
@@ -2887,13 +2909,13 @@ function mountSetupSkeleton(seat, p, opp) {
         ${setupPickMode === "random" ? `<button class="ghost" id="rerollBtn" style="width:100%;margin-bottom:12px">🎲 Draw ${HAND_SIZE} random cards</button>` : ""}
         <div class="hand-strip" id="pickHandStrip">
           ${p.pool.length === 0 ? `<div class="empty-hint">No cards selected yet</div>` : p.pool.map(n => `
-            <div class="mini-card"><img src="${getCardImage(n)}" alt="${n}"><button data-remove="${escapeHtml(n)}">×</button></div>
+            <div class="mini-card">${cardArtHtml(n)}<button data-remove="${escapeHtml(n)}">×</button></div>
           `).join("")}
         </div>
         <div class="pool-grid">
           ${CARDS.filter(c => !c.dlc).map(c => `
             <div class="pool-card ${p.pool.includes(c.name) ? "selected" : ""} ${!p.pool.includes(c.name) && p.pool.length >= HAND_SIZE ? "disabled" : ""}" data-pick="${escapeHtml(c.name)}">
-              <img src="${getCardImage(c.name)}" alt="${c.name}">
+              ${cardArtHtml(c.name)}
               <div class="pc-cost">${c.cost}⚡</div>
               <div class="pc-name">${c.name}</div>
             </div>
@@ -2904,7 +2926,7 @@ function mountSetupSkeleton(seat, p, opp) {
         <div class="pool-grid">
           ${CARDS.filter(c => c.dlc).map(c => `
             <div class="pool-card dlc-card ${p.pool.includes(c.name) ? "selected" : ""} ${!p.pool.includes(c.name) && p.pool.length >= HAND_SIZE ? "disabled" : ""}" data-pick="${escapeHtml(c.name)}">
-              <img src="${getCardImage(c.name)}" alt="${c.name}">
+              ${cardArtHtml(c.name)}
               <div class="pc-cost">${c.cost}⚡</div>
               <div class="pc-name">${c.name}</div>
               <div class="pc-dlc-tag">DLC</div>
@@ -2947,7 +2969,7 @@ function mountSetupSkeleton(seat, p, opp) {
 }
 
 function miniCardHtml(name) {
-  return `<div class="mini-card"><img src="${getCardImage(name)}" alt="${name}"></div>`;
+  return `<div class="mini-card">${cardArtHtml(name)}</div>`;
 }
 
 function escapeHtml(s) {
@@ -3230,7 +3252,7 @@ function renderBoard() {
   if (handCards) {
     const myHandHtml = me.hand.length === 0 ? `<div class="empty-hint">Empty</div>` : me.hand.map(name => {
       const c = cardDef(name);
-      return `<div class="hand-card" data-handcard="${escapeHtml(name)}"><img src="${getCardImage(name)}" alt="${name}"><div class="hc-name">${name}</div><div class="hc-cost">${c.cost}⚡</div></div>`;
+      return `<div class="hand-card" data-handcard="${escapeHtml(name)}">${cardArtHtml(name)}<div class="hc-name">${name}</div><div class="hc-cost">${c.cost}⚡</div></div>`;
     }).join("");
     if (handCards.dataset.cachedHtml !== myHandHtml) {
       handCards.innerHTML = myHandHtml;
@@ -3255,12 +3277,12 @@ function renderBoard() {
   let gyChanged = false;
   if (gyP1) {
     document.getElementById("gyP1Label").textContent = `Player 1 (${p1.graveyard.length})`;
-    const gyHtml1 = p1.graveyard.map((n, i) => `<div class="gy-card" data-gycard="1|${i}" title="View ${escapeHtml(n)}"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
+    const gyHtml1 = p1.graveyard.map((n, i) => `<div class="gy-card" data-gycard="1|${i}" title="View ${escapeHtml(n)}">${cardArtHtml(n)}</div>`).join("") || `<div class="empty-hint">—</div>`;
     if (gyP1.dataset.cachedHtml !== gyHtml1) { gyP1.innerHTML = gyHtml1; gyP1.dataset.cachedHtml = gyHtml1; gyChanged = true; }
   }
   if (gyP2) {
     document.getElementById("gyP2Label").textContent = `Player 2 (${p2.graveyard.length})`;
-    const gyHtml2 = p2.graveyard.map((n, i) => `<div class="gy-card" data-gycard="2|${i}" title="View ${escapeHtml(n)}"><img src="${getCardImage(n)}" alt="${n}"></div>`).join("") || `<div class="empty-hint">—</div>`;
+    const gyHtml2 = p2.graveyard.map((n, i) => `<div class="gy-card" data-gycard="2|${i}" title="View ${escapeHtml(n)}">${cardArtHtml(n)}</div>`).join("") || `<div class="empty-hint">—</div>`;
     if (gyP2.dataset.cachedHtml !== gyHtml2) { gyP2.innerHTML = gyHtml2; gyP2.dataset.cachedHtml = gyHtml2; gyChanged = true; }
   }
   if (gyChanged) {
@@ -3529,7 +3551,7 @@ function unitCardHtml(seat, lane, u, targetable) {
   const hasReflect = hasStatus(u, "reflect_next_hit");
   return `
     <div class="unit-card ${disabled ? "disabled-unit" : ""} ${mine ? "" : "locked-unit"} ${isSelected ? "selected-detail" : ""} ${targetable ? "targetable" : ""}" data-unit="${seat}|${lane}|${u.instanceId}" title="${mine ? "" : "Opponent's unit — view only"}">
-      <img src="${getCardImage(u.name)}" alt="${u.name}">
+      ${cardArtHtml(u.name)}
       ${dmgBuff ? `<div class="uc-badge uc-badge-dmg" title="Damage buff (status)">⚔+${dmgBuff.amount || 0}${dmgBuff.multiplier ? "×" + dmgBuff.multiplier : ""}</div>` : ""}
       ${showContinuousBadge ? `<div class="uc-badge uc-badge-dmg" title="Passive damage bonus">⚔+${continuousDmgBonus}</div>` : ""}
       ${overHeal > 0 ? `<div class="uc-badge uc-badge-overheal" title="Over health">♥+${overHeal}</div>` : ""}
@@ -3573,7 +3595,7 @@ function detailPanelHtml() {
   return `
     <div class="detail-panel panel">
       <div class="dp-head">
-        <img src="${getCardImage(u.name)}" alt="${u.name}">
+        ${cardArtHtml(u.name)}
         <div>
           <div class="dp-title">${u.name}</div>
           <div class="dp-sub">${def.pronouns || ""} · Cost ${def.cost} · ${lane} lane${cont && cont.fullyImmune ? " · <span style='color:var(--accent)'>Immune</span>" : ""}</div>
@@ -3688,7 +3710,7 @@ function actionButtonsHtml(seat, lane, u, def, eng) {
     const copiedCard = copiedName && CARDS.find(c => c.name === copiedName);
     const copiedBadge = copiedName ? `
       <div class="dp-section" style="display:flex;align-items:center;gap:8px;padding:6px 0">
-        <img src="${getCardImage(copiedName)}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;border:2px solid var(--accent)">
+        ${cardArtHtml(copiedName, "width:32px;height:32px;border-radius:50%;object-fit:cover;border:2px solid var(--accent)")}
         <span style="font-size:12px;color:var(--text-secondary)">Copying <strong style="color:var(--text)">${copiedName}</strong>'s passive: <em>${copiedCard ? copiedCard.passive : ""}</em></span>
       </div>` : "";
     passiveSection = `
@@ -3750,7 +3772,7 @@ function targetPickerHtml(seat, lane, u, targeting) {
     prompt = `
       <div class="targeting-prompt">Pick a card from the opponent's hand to steal.</div>
       <div class="hand-strip" style="flex-wrap:wrap;min-height:auto">
-        ${oppHand.map((name, i) => `<div class="mini-card" style="width:54px;height:54px" data-stealpick="${i}"><img src="${getCardImage(name)}" alt="?"></div>`).join("")}
+        ${oppHand.map((name, i) => `<div class="mini-card" style="width:54px;height:54px" data-stealpick="${i}">${cardArtHtml(name)}</div>`).join("")}
       </div>`;
   } else if (need.kind === "handCardChoice") {
     const oppSeat = seat === "1" ? "2" : "1";
@@ -3758,14 +3780,14 @@ function targetPickerHtml(seat, lane, u, targeting) {
     prompt = `
       <div class="targeting-prompt">View opponent's hand — pick a card to increase its cost by 2.</div>
       <div class="hand-strip" style="flex-wrap:wrap;min-height:auto">
-        ${oppHand.map(name => `<div class="mini-card" style="width:54px;height:54px" data-handpick="${escapeHtml(name)}"><img src="${getCardImage(name)}" alt="${name}"></div>`).join("")}
+        ${oppHand.map(name => `<div class="mini-card" style="width:54px;height:54px" data-handpick="${escapeHtml(name)}">${cardArtHtml(name)}</div>`).join("")}
       </div>`;
   } else if (need.kind === "summonCardChoice") {
     const myHand = game.players[seat].hand;
     prompt = `
       <div class="targeting-prompt">Pick a card from your hand to summon for free.</div>
       <div class="hand-strip" style="flex-wrap:wrap;min-height:auto">
-        ${myHand.length === 0 ? `<div class="empty-hint">Your hand is empty</div>` : myHand.map(name => `<div class="mini-card" style="width:54px;height:54px" data-summonfreepick="${escapeHtml(name)}"><img src="${getCardImage(name)}" alt="${name}"></div>`).join("")}
+        ${myHand.length === 0 ? `<div class="empty-hint">Your hand is empty</div>` : myHand.map(name => `<div class="mini-card" style="width:54px;height:54px" data-summonfreepick="${escapeHtml(name)}">${cardArtHtml(name)}</div>`).join("")}
       </div>`;
   } else if (need.kind === "summonLaneChoice") {
     prompt = `
@@ -3895,7 +3917,7 @@ function addUnitModalHtml() {
         const c = cardDef(name);
         const afford = useFree || p.energy >= c.cost;
         return `<div class="mini-card" style="width:54px;height:54px;${afford ? "" : "opacity:0.4"}" data-summonpick="${escapeHtml(name)}">
-          <img src="${getCardImage(name)}" alt="${name}">
+          ${cardArtHtml(name)}
         </div>`;
       }).join("")}
     </div>
@@ -3922,7 +3944,7 @@ function summonModalHtml() {
   const afford = useFree || p.energy >= c.cost;
   return `
     <div class="modal-head">
-      <img src="${getCardImage(name)}" alt="${name}" style="width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid var(--border-strong)">
+      ${cardArtHtml(name, "width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid var(--border-strong)")}
       <div>
         <div class="mh-title">${name}</div>
         <div class="mh-sub">${c.pronouns || ""} · Cost ${useFree ? "Free" : c.cost} · HP ${c.hp}</div>
@@ -3973,7 +3995,7 @@ function viewCardModalHtml() {
   const c = cardDef(name);
   return `
     <div class="modal-head">
-      <img src="${getCardImage(name)}" alt="${name}" style="width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid var(--border-strong)">
+      ${cardArtHtml(name, "width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid var(--border-strong)")}
       <div>
         <div class="mh-title">${name}</div>
         <div class="mh-sub">${c.pronouns || ""} · Cost ${c.cost} · HP ${c.hp}</div>
