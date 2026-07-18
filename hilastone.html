@@ -716,7 +716,10 @@ const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_
 const ADJACENT = { Left: ["Center"], Center: ["Left", "Right"], Right: ["Center"] };
 
 function cardDef(name) { return CARDS.find(c => c.name === name) || CARDS.find(c => c.name === CARD_NAME_ALIASES[name]); }
-function getCardImage(name) { return CARD_IMAGES[name] || null; }
+function getCardImage(name) {
+  const def = cardDef(name);
+  return (def && def.image) || null;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Audio system — BGM (streamed MP3) + SFX (Web Audio API synthesis, no files)
