@@ -715,7 +715,7 @@ const FIREBASE_CONFIG = { apiKey: "AIzaSyAvbBKj-KE4dYa_UyPq5OXB3rj3nrRTxQI", pro
 const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents`;
 const ADJACENT = { Left: ["Center"], Center: ["Left", "Right"], Right: ["Center"] };
 
-function cardDef(name) { return CARDS.find(c => c.name === name); }
+function cardDef(name) { return CARDS.find(c => c.name === name) || CARDS.find(c => c.name === CARD_NAME_ALIASES[name]); }
 function getCardImage(name) { return CARD_IMAGES[name] || null; }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2372,6 +2372,7 @@ function resetMatch() {
   game = freshGameState();
   engine = null; // force re-wrap on the new object
   scheduleSave();
+  render();
 }
 // ---------------- Generic correction actions ----------------
 // Honor-system games occasionally need a move that isn't tied to any one
@@ -2762,7 +2763,7 @@ function render() {
         <button id="hardResetBtn" class="danger">Reset this match and start fresh</button>
       </div>`;
     const btn = document.getElementById("hardResetBtn");
-    if (btn) btn.onclick = () => { game = freshGameState(); scheduleSave(); };
+    if (btn) btn.onclick = () => { game = freshGameState(); engine = null; scheduleSave(); render(); };
   }
 }
 

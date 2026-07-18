@@ -243,7 +243,17 @@ class Engine {
     this.events = []; // events produced by the *current* resolution call
   }
 
-  cardDef(name) { return this.cards[name]; }
+  cardDef(name) {
+    if (this.cards[name]) return this.cards[name];
+    // Backward-compat: a saved/in-progress match may still hold a unit under
+    // a card's OLD name from before a rename (see CARD_NAME_ALIASES in
+    // hilastone-data.js). Without this, a stale name here returns undefined
+    // and the very next property access on it crashes rendering entirely.
+    if (typeof CARD_NAME_ALIASES !== "undefined" && CARD_NAME_ALIASES[name]) {
+      return this.cards[CARD_NAME_ALIASES[name]];
+    }
+    return undefined;
+  }
 
   emit(type, payload) {
     const ev = Object.assign({ type: type }, payload, { ts: Date.now() });
