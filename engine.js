@@ -375,6 +375,15 @@ class Engine {
     }
 
     this.firePassiveTrigger("on_place", { seat: seat, lane: lane, instanceId: unit.instanceId, passiveTargets: opts.passiveTargets || {} });
+    // alsoOnPlace: secondary effects that fire once at summon time alongside
+    // (not instead of) the primary passive trigger — currently only
+    // Andromeda's kit randomization (Referendum), so she never sits with a
+    // blank/static kit before her owner's first turn start.
+    if (def.passive && def.passive.alsoOnPlace) {
+      for (const eff of def.passive.alsoOnPlace) {
+        this.runOp(eff, { actorUnit: unit, actorSeat: seat, actorLane: lane, targets: {} });
+      }
+    }
     this.applyOnPlaceLaneBans(unit, seat, lane);
     this.checkLinkedSummons(seat);
     this.maybeFireTurnStartPassiveOnSummon(unit, seat, lane, def);
@@ -507,6 +516,19 @@ class Engine {
 
     this.emit("turn_start", { seat: seat });
     this.firePassiveTrigger("on_turn_start", { seat: seat });
+    // alsoOnTurnStart: secondary effects that fire once per owner turn start
+    // alongside (not instead of) the primary passive_continuous trigger —
+    // currently only Andromeda's kit randomization (Referendum).
+    for (const lane of LANES) {
+      for (const unit of this.state.players[seat][laneKey(lane)].slice()) {
+        if (hasStatus(unit, "passive_negated")) continue;
+        const def = this.cardDef(unit.name);
+        if (!def.passive || !def.passive.alsoOnTurnStart) continue;
+        for (const eff of def.passive.alsoOnTurnStart) {
+          this.runOp(eff, { actorUnit: unit, actorSeat: seat, actorLane: lane, targets: {} });
+        }
+      }
+    }
     this.flushPendingEffects(seat, "turn_start");
     this.firePassiveTrigger("on_turn_start_self_cost", { seat: seat });
   }
@@ -740,6 +762,14 @@ class Engine {
     // anything that assumes exactly 3 actions.
     if (actionIndex === "passive") {
       return def.passiveAction || null;
+    }
+    // Andromeda: her three action slots are re-randomized every turn (and
+    // immediately on summon) from any character's kit, independent of the
+    // slot's usual cost tier — see op_randomize_kit. unit.flags.andromedaKit
+    // holds the currently-assigned {sourceName, sourceIndex, action} per slot.
+    if (unit.flags && unit.flags.andromedaKit && typeof actionIndex === "number") {
+      const slot = unit.flags.andromedaKit[actionIndex];
+      if (slot) return slot.action;
     }
     const raw = def.actions[actionIndex];
     if (!raw) return null;
@@ -2119,6 +2149,33 @@ class Engine {
     this.op_grant_energy({ amount: eff.amount * count, target: eff.target || "self_player" }, frame);
   }
 
+  // Linnaeus a3 (reworked): "Consume all Energy. Deal 4 Damage for every
+  // Energy spent from this action towards a single target. If this
+  // character is in the same lane as Piper, this Damage is dealt to all
+  // cards on the opposing lane instead." Whatever energy remains AFTER
+  // paying this action's own cost is fully drained and converted to damage.
+  op_consume_all_energy_damage(eff, frame) {
+    const p = this.state.players[frame.actorSeat];
+    const spent = p.energy;
+    if (spent <= 0) return;
+    p.energy = 0;
+    this.emit("energy_change", { seat: frame.actorSeat, amount: -spent, newTotal: 0, reason: "consumed_by_action" });
+    const amount = (eff.amountPerEnergy || 4) * spent;
+    const withPiper = this.state.players[frame.actorSeat][laneKey(frame.actorLane)].some(function (u) { return u.name === "Piper"; });
+    if (withPiper) {
+      const oppSeat = this.opponentOf(frame.actorSeat);
+      const targets = this.state.players[oppSeat][laneKey(frame.actorLane)].slice();
+      for (const t of targets) {
+        this.applyDamage(t, amount, frame.actorUnit, frame.actorSeat, { multiTarget: true, isSelfDamage: false });
+      }
+    } else {
+      const units = this.resolveTargetUnits(eff.target || "single_enemy", frame, eff);
+      for (const u of units) {
+        this.applyDamage(u, amount, frame.actorUnit, frame.actorSeat, { multiTarget: false, isSelfDamage: false });
+      }
+    }
+  }
+
   // Audrey passive: "grant 2 HP to all allies per empty opp slot"
   op_heal_per_empty_opp_slot(eff, frame) {
     const oppSeat = this.opponentOf(frame.actorSeat);
@@ -2153,6 +2210,15 @@ class Engine {
   op_heal_per_opp_in_lane(eff, frame) {
     const oppSeat = this.opponentOf(frame.actorSeat);
     const count = this.state.players[oppSeat][laneKey(frame.actorLane)].length;
+    if (count === 0) return;
+    this.op_heal({ amount: eff.amount * count, target: eff.target || "self", temporary: !!eff.temporary }, frame);
+  }
+
+  // Piper passive (reworked): "Every turn, gain N HP for every active ally
+  // card in the lane" — counts herself too, since she's an active ally in
+  // her own lane.
+  op_heal_per_ally_in_lane(eff, frame) {
+    const count = this.state.players[frame.actorSeat][laneKey(frame.actorLane)].length;
     if (count === 0) return;
     this.op_heal({ amount: eff.amount * count, target: eff.target || "self", temporary: !!eff.temporary }, frame);
   }
@@ -2633,6 +2699,82 @@ class Engine {
     }
   }
 
+  // Andromeda: "Referendum" reroll. Every turn her owner's turn starts (and
+  // once immediately on summon, via alsoOnPlace), she randomly picks ANOTHER
+  // character's passive — fired with THAT character's own trigger semantics,
+  // reusing the exact same borrowed-passive machinery as Crumbs' copy_passive
+  // — plus three independently-random actions from anywhere in the whole
+  // cast for her three slots. Slot assignment ignores cost tiers entirely:
+  // her Action 1 button might end up holding another character's cost-3
+  // action, unchanged. Her own actual Referendum effect (double Damage/HP
+  // boosts in the lane) lives on selfDef.passive.effects as before and stays
+  // active the whole time regardless of what gets rolled here.
+  op_randomize_kit(eff, frame) {
+    const self = frame.actorUnit;
+    const seat = frame.actorSeat;
+    const lane = frame.actorLane;
+    const pool = Object.keys(this.cards).filter((n) => {
+      return n !== self.name && !this.cards[n].dlc && !this.cards[n].banished;
+    });
+    if (!pool.length) return;
+
+    // Clear out whatever she borrowed last reroll before picking anew.
+    self.statuses = self.statuses.filter(function (s) { return !(s.meta && s.meta.andromedaSource); });
+
+    // Draw without replacement: the passive source and all 3 action sources
+    // must all be different characters — no repeats across any of the 4 picks.
+    const remaining = pool.slice();
+    const drawName = () => {
+      if (!remaining.length) return null;
+      const idx = Math.floor(this.rng() * remaining.length);
+      return remaining.splice(idx, 1)[0];
+    };
+
+    // -- passive: one random source, fired with ITS trigger semantics --
+    const passiveSourceName = drawName();
+    if (passiveSourceName) {
+      const passiveDef = this.cards[passiveSourceName];
+      const pd = passiveDef.passive;
+      self.flags.copiedPassiveName = passiveSourceName; // reuses Crumbs' UI badge
+      this.emit("andromeda_reroll_passive", { instanceId: self.instanceId, sourceName: passiveSourceName });
+      if (pd) {
+        if (pd.trigger === "passive_continuous") {
+          for (const e of pd.effects) {
+            addStatus(self, { kind: "borrowed_passive_op", meta: Object.assign({}, e, { andromedaSource: true }) });
+          }
+        } else if (pd.trigger === "on_place") {
+          // on_place has already happened for her — nothing to re-fire.
+        } else {
+          if ((pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") && pd.scope === "both_players") {
+            this.resolveWheelieLikePassive(self, seat, lane, passiveDef, { seat: seat });
+          } else if (pd.trigger === "on_turn_start" || pd.trigger === "on_turn_start_self_cost") {
+            this.runPassiveEffects(self, seat, lane, passiveDef, {});
+          }
+          addStatus(self, {
+            kind: "borrowed_passive_trigger",
+            meta: { passiveData: pd, sourceName: passiveSourceName, andromedaSource: true },
+          });
+        }
+      }
+    }
+
+    // -- actions: 3 independent picks, each from a DIFFERENT remaining character, any index, any slot --
+    const slots = [];
+    for (let i = 0; i < 3; i++) {
+      const srcName = drawName();
+      if (!srcName) break; // pool exhausted (shouldn't happen with 60+ cards)
+      const srcDef = this.cards[srcName];
+      const srcIdx = Math.floor(this.rng() * 3);
+      const srcAction = srcDef.actions[srcIdx];
+      slots.push({ sourceName: srcName, sourceIndex: srcIdx, action: srcAction });
+    }
+    self.flags.andromedaKit = slots;
+    this.emit("andromeda_reroll_actions", {
+      instanceId: self.instanceId,
+      slots: slots.map(function (s) { return { name: s.sourceName, index: s.sourceIndex }; }),
+    });
+  }
+
   op_trigger_passive_again(eff, frame) {
     const def = this.cardDef(frame.actorUnit.name);
     if (!def.passive) return;
@@ -2695,6 +2837,26 @@ class Engine {
     this.emit("status_applied", { instanceId: frame.actorUnit.instanceId, kind: "retaliatory_watch" });
   }
   op_boost_allies_in_lane(eff, frame) { /* handled inline in op_buff_damage/op_heal via getLaneBoostMultiplier */ }
+
+  // Arlukino passive (reworked "Overshadow"): "Every turn, randomize the HP
+  // of all cards in this lane, friend or foe, including self, ranging from
+  // 1 to 20 HP." A direct HP set (not a heal/damage), so it bypasses max-HP
+  // caps and damage/heal passives entirely — always lands in [min, max].
+  op_randomize_hp_in_lane(eff, frame) {
+    const min = eff.min || 1;
+    const max = eff.max || 20;
+    const oppSeat = this.opponentOf(frame.actorSeat);
+    for (const seatKey of [frame.actorSeat, oppSeat]) {
+      for (const unit of this.state.players[seatKey][laneKey(frame.actorLane)].slice()) {
+        const found = findUnit(this.state, unit.instanceId);
+        if (!found) continue;
+        const before = found.unit.hp;
+        const after = min + Math.floor(this.rng() * (max - min + 1));
+        found.unit.hp = after;
+        this.emit("hp_randomized", { instanceId: unit.instanceId, before: before, after: after });
+      }
+    }
+  }
   op_free_summon_per_turn(eff, frame) { /* handled by findActiveUnitGrantingFreeSummon + summon() opt-in */ }
   op_defeat_requires_exact_zero(eff, frame) { /* handled inline in defeatUnit (Lucia) */ }
   op_bonus_damage_per_graveyard(eff, frame) { /* handled by getContinuousState/applyContinuousEffect (Jacie) */ }
